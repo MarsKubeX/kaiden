@@ -42,13 +42,14 @@ export class SettingsPage extends BasePage {
 
   constructor(page: Page) {
     super(page);
-    this.resourcesTab = page.getByRole('link', { name: 'Resources' });
-    this.cliTab = page.getByRole('link', { name: 'CLI' });
-    this.proxyTab = page.getByRole('link', { name: 'Proxy' });
-    this.codingAgentsTab = page.getByRole('link', { name: 'Coding agents' });
-    this.mcpTab = page.getByRole('link', { name: 'MCP' });
-    this.modelsTab = page.getByRole('link', { name: 'Models' });
-    this.preferencesTab = page.getByRole('link', { name: 'Preferences' });
+    const sidebar = page.getByRole('navigation', { name: 'PreferencesNavigation' });
+    this.resourcesTab = sidebar.getByRole('link', { name: 'Resources' });
+    this.cliTab = sidebar.getByRole('link', { name: 'CLI' });
+    this.proxyTab = sidebar.getByRole('link', { name: 'Proxy' });
+    this.codingAgentsTab = sidebar.getByRole('link', { name: 'Coding agents' });
+    this.mcpTab = sidebar.getByRole('link', { name: 'MCP' });
+    this.modelsTab = sidebar.getByRole('link', { name: 'Models' });
+    this.preferencesTab = sidebar.getByRole('link', { name: 'Preferences' });
     this.tabs = [
       this.resourcesTab,
       this.cliTab,
