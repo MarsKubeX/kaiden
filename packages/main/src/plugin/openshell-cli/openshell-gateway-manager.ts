@@ -37,6 +37,7 @@ import { OpenshellGatewayConfig } from './openshell-gateway-config.js';
 import { OpenshellSdkClientManager } from './openshell-sdk-client-manager.js';
 
 const SYSTEM_GATEWAY_DIR_ENV = 'OPENSHELL_SYSTEM_GATEWAY_DIR';
+// Only used on Linux/macOS; #systemConfigDir() returns undefined on Windows.
 const DEFAULT_SYSTEM_CONFIG_DIR = '/etc/openshell';
 const METADATA_FILENAME = 'metadata.json';
 const ACTIVE_GATEWAY_FILENAME = 'active_gateway';

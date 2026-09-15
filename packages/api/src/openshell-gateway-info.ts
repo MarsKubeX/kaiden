@@ -218,7 +218,7 @@ export const GatewayMetadataSourceSchema = z.enum(['user', 'system']);
 
 export type GatewayMetadataSource = z.output<typeof GatewayMetadataSourceSchema>;
 
-export const GatewayMetadataSchema = z.object({
+export const GatewayMetadataSchema = z.looseObject({
   name: z.string(),
   gateway_endpoint: z.string(),
   is_remote: z.boolean().default(false),
