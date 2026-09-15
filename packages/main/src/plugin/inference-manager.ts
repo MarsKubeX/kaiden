@@ -1,0 +1,223 @@
+/**********************************************************************
+ * Copyright (C) 2026 Red Hat, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ ***********************************************************************/
+
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+
+import type { LanguageModel, ModelMessage, StopCondition, ToolSet, UIMessage } from 'ai';
+import { convertToModelMessages, generateObject, generateText, isStepCount } from 'ai';
+import { inject, injectable } from 'inversify';
+
+import type {
+  DetectFlowFieldsParams,
+  DetectFlowFieldsResult,
+  FlowParameter,
+  FlowParameterAIGenerated,
+} from '/@api/inference/detect-flow-fields-schema.js';
+import { DetectFlowFieldsResultSchema } from '/@api/inference/detect-flow-fields-schema.js';
+import type { FlowGenerationParameters } from '/@api/inference/flow-generation-parameters-schema.js';
+import { FlowGenerationParametersSchema } from '/@api/inference/flow-generation-parameters-schema.js';
+import type { InferenceParameters } from '/@api/inference/InferenceParameters.js';
+
+import { IPCHandle } from './api.js';
+import { FileContentDetector } from './inference/file-content-detector.js';
+import { buildPromptOnlySystemPrompt } from './inference/flow-detect-prompts.js';
+import { MCPManager } from './mcp/mcp-manager.js';
+import { ProviderRegistry } from './provider-registry.js';
+
+@injectable()
+export class InferenceManager {
+  private readonly fileDetector = new FileContentDetector();
+
+  constructor(
+    @inject(ProviderRegistry)
+    private readonly providerRegistry: ProviderRegistry,
+    @inject(MCPManager)
+    private readonly mcpManager: MCPManager,
+    @inject(IPCHandle)
+    private readonly ipcHandle: IPCHandle,
+  ) {}
+
+  init(): void {
+    this.ipcHandle('inference:generate', (_, params) => this.generate(params));
+    this.ipcHandle('inference:generateFlowParams', (_, params) => this.generateFlowParams(params));
+    this.ipcHandle('inference:detectFlowFields', (_, params) => this.detectFlowFields(params));
+  }
+
+  private convertFilePartForModel(
+    part: { type: 'file'; url: string; mediaType: string; filename?: string },
+    buffer: Buffer,
+    base64: string,
+  ): UIMessage['parts'][number] {
+    if (this.fileDetector.isTextContent(part.mediaType, part.filename, buffer)) {
+      const label = part.filename ? `[File: ${part.filename}]` : '[File]';
+      return { type: 'text', text: `${label}\n${buffer.toString('utf-8')}` };
+    }
+    return { ...part, url: base64 };
+  }
+
+  private async convertMessages(messages: UIMessage[]): Promise<UIMessage[]> {
+    const result: UIMessage[] = [];
+    for (const message of messages) {
+      const convertedParts: UIMessage['parts'] = [];
+      for (const part of message.parts) {
+        if (part.type === 'file' && part.url.startsWith('file://')) {
+          const filepath = fileURLToPath(part.url);
+          let buffer: Buffer;
+          try {
+            buffer = await readFile(filepath);
+          } catch (e) {
+            console.error(`Failed to read file: ${filepath}`, e);
+            convertedParts.push({
+              type: 'text',
+              text: `[File: ${part.filename ?? filepath} - Error reading file]`,
+            });
+            continue;
+          }
+          const base64 = buffer.toString('base64');
+          part.url = `data:${part.mediaType};base64,${base64}`;
+          convertedParts.push(this.convertFilePartForModel(part, buffer, base64));
+        } else if (part.type === 'file' && part.url.startsWith('data:')) {
+          const commaIndex = part.url.indexOf(',');
+          if (commaIndex < 0) {
+            console.warn(`Malformed data URL (no comma) for file: ${part.filename}`);
+            convertedParts.push(part);
+            continue;
+          }
+          const base64 = part.url.substring(commaIndex + 1);
+          const buffer = Buffer.from(base64, 'base64');
+          convertedParts.push(this.convertFilePartForModel(part, buffer, base64));
+        } else {
+          convertedParts.push(part);
+        }
+      }
+      result.push({ ...message, parts: convertedParts });
+    }
+    return result;
+  }
+
+  private getMostRecentUserMessage(messages: UIMessage[]): UIMessage | undefined {
+    const userMessages = messages.filter(message => message.role === 'user');
+    return userMessages.at(-1);
+  }
+
+  private async getInferenceComponents(params: InferenceParameters): Promise<{
+    model: LanguageModel;
+    messages: ModelMessage[];
+    tools: ToolSet;
+    stopWhen: StopCondition<ToolSet>;
+    instructions: string;
+    userMessage: UIMessage;
+  }> {
+    const internalProviderId = this.providerRegistry.getMatchingProviderInternalId(params.providerId);
+    const sdk = this.providerRegistry.getInferenceSDK(internalProviderId, params.connectionId);
+    const model = sdk.languageModel(params.modelId);
+
+    const userMessage = this.getMostRecentUserMessage(params.messages);
+
+    if (!userMessage) {
+      throw new Error('No user message found');
+    }
+
+    const convertedMessages = await this.convertMessages(params.messages);
+    const messages = await convertToModelMessages(convertedMessages);
+
+    const tools = await this.mcpManager.getToolSet(params.tools);
+
+    return {
+      model,
+      userMessage,
+      messages,
+      tools,
+      stopWhen: isStepCount(5),
+      instructions: 'You are a friendly assistant! Keep your responses concise and helpful.',
+    };
+  }
+
+  async generate(params: InferenceParameters): Promise<string> {
+    const result = await generateText(await this.getInferenceComponents(params));
+    return result.text;
+  }
+
+  async generateFlowParams(params: InferenceParameters): Promise<FlowGenerationParameters> {
+    const result = await generateObject({
+      ...(await this.getInferenceComponents(params)),
+      schema: FlowGenerationParametersSchema,
+    });
+    return result.object;
+  }
+
+  private extractParameterNamesFromPrompt(prompt: string): string[] {
+    const regex = /\{\{(\w+)\}\}/g;
+    const matches = [...prompt.matchAll(regex)];
+    const paramNames = matches.map(match => match[1]).filter((name): name is string => name !== undefined);
+    return [...new Set(paramNames)];
+  }
+
+  private mergeParameters(
+    extracted: FlowParameterAIGenerated[],
+    aiGenerated: FlowParameterAIGenerated[],
+  ): FlowParameter[] {
+    const paramMap = new Map<string, FlowParameterAIGenerated>();
+
+    for (const param of aiGenerated) {
+      paramMap.set(param.name, param);
+    }
+
+    for (const param of extracted) {
+      const existing = paramMap.get(param.name);
+      if (existing) {
+        paramMap.set(param.name, {
+          ...existing,
+          default: param.default ?? existing.default,
+        });
+      }
+    }
+
+    return Array.from(paramMap.values()).map(param => ({
+      ...param,
+      required: param.default === undefined,
+    }));
+  }
+
+  async detectFlowFields(params: DetectFlowFieldsParams): Promise<DetectFlowFieldsResult> {
+    const internalProviderId = this.providerRegistry.getMatchingProviderInternalId(params.providerId);
+    const sdk = this.providerRegistry.getInferenceSDK(internalProviderId, params.connectionId);
+    const model = sdk.languageModel(params.modelId);
+
+    const systemPrompt = buildPromptOnlySystemPrompt(params.prompt);
+
+    const result = await generateObject({
+      model,
+      prompt: params.prompt,
+      instructions: systemPrompt,
+      schema: DetectFlowFieldsResultSchema,
+    });
+
+    const { prompt: updatedPrompt, parameters: aiParameters } = result.object;
+
+    const parameterNamesInPrompt = this.extractParameterNamesFromPrompt(updatedPrompt);
+    const filteredParameters = aiParameters.filter(param => parameterNamesInPrompt.includes(param.name));
+    const mergedParameters = this.mergeParameters([], filteredParameters);
+
+    return {
+      prompt: updatedPrompt,
+      parameters: mergedParameters,
+    };
+  }
+}

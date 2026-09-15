@@ -21,7 +21,9 @@ import type { IpcMainInvokeEvent } from 'electron/main';
 import { inject, injectable } from 'inversify';
 
 import { IPCHandle } from '/@/plugin/api.js';
+import type { MCPMessageExchange } from '/@/plugin/mcp/mcp-exchanges.js';
 import { MCPExporter } from '/@/plugin/mcp/mcp-exporter.js';
+import { MCPManager } from '/@/plugin/mcp/mcp-manager.js';
 import { MCPRegistry } from '/@/plugin/mcp/mcp-registry.js';
 import type { MCPExportTarget } from '/@api/mcp/mcp-export.js';
 
@@ -34,12 +36,15 @@ export class MCPIPCHandler {
     private readonly mcpRegistry: MCPRegistry,
     @inject(MCPExporter)
     private readonly mcpExporter: MCPExporter,
+    @inject(MCPManager)
+    private readonly mcpManager: MCPManager,
   ) {}
 
   init(): void {
     this.ipcHandle('mcp-registry:createMCPRegistry', this.createMCPRegistry.bind(this));
     this.ipcHandle('mcp-registry:exportServer', this.exportServer.bind(this));
     this.ipcHandle('mcp-registry:getExportConfigPath', this.getExportConfigPath.bind(this));
+    this.ipcHandle('mcp-manager:getExchanges', this.getExchanges.bind(this));
     this.ipcHandle('mcp-manager:startMCPServer', this.startMCPServer.bind(this));
     this.ipcHandle('mcp-manager:stopMCPServer', this.stopMCPServer.bind(this));
   }
@@ -57,6 +62,10 @@ export class MCPIPCHandler {
 
   protected getExportConfigPath(_: IpcMainInvokeEvent, target: MCPExportTarget): string {
     return this.mcpExporter.getConfigFilePath(target);
+  }
+
+  protected getExchanges(_: IpcMainInvokeEvent, mcpId: string): MCPMessageExchange[] {
+    return this.mcpManager.getExchanges(mcpId);
   }
 
   protected async startMCPServer(_: IpcMainInvokeEvent, key: string): Promise<void> {

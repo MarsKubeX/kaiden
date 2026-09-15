@@ -224,6 +224,7 @@ import { ImageCheckerImpl } from './image-checker.js';
 import { ImageFilesRegistry } from './image-files-registry.js';
 import { ImageRegistry } from './image-registry.js';
 import { InferenceConnectionSummaryRegistry } from './inference-connection-summary-registry.js';
+import { InferenceManager } from './inference-manager.js';
 import { InputQuickPickRegistry } from './input-quickpick/input-quickpick-registry.js';
 import { ExtensionInstaller } from './install/extension-installer.js';
 import { KubernetesClient } from './kubernetes/kubernetes-client.js';
@@ -629,6 +630,7 @@ export class PluginSystem {
     container.bind<OnboardingInit>(OnboardingInit).toSelf().inSingletonScope();
     container.bind<KubernetesClient>(KubernetesClient).toSelf().inSingletonScope();
     container.bind<ChatManager>(ChatManager).toSelf().inSingletonScope();
+    container.bind<InferenceManager>(InferenceManager).toSelf().inSingletonScope();
     container.bind<ModelRegistry>(ModelRegistry).toSelf().inSingletonScope();
     container.bind<InferenceConnectionSummaryRegistry>(InferenceConnectionSummaryRegistry).toSelf().inSingletonScope();
     container.bind<SchedulerRegistry>(SchedulerRegistry).toSelf().inSingletonScope();
@@ -726,6 +728,9 @@ export class PluginSystem {
 
     const skillManager = container.get<SkillManager>(SkillManager);
     await skillManager.init();
+
+    const inferenceManager = container.get<InferenceManager>(InferenceManager);
+    inferenceManager.init();
 
     const chatManager = container.get<ChatManager>(ChatManager);
     await chatManager.init();
