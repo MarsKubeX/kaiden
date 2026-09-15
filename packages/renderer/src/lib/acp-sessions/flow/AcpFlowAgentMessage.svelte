@@ -1,8 +1,8 @@
 <script lang="ts">
-import '/@/lib/chat/components/messages/code-copy.css';
+import '/@/lib/ui/code-copy.css';
 
-import { codeCopyButtons } from '/@/lib/chat/components/messages/code-copy-action';
 import Markdown from '/@/lib/markdown/Markdown.svelte';
+import { codeCopyButtons } from '/@/lib/ui/code-copy-action';
 import type { AcpFlowAgentMessageEvent } from '/@api/acp-session-info';
 
 import AcpCopyButton from './AcpCopyButton.svelte';

@@ -1,12 +1,12 @@
 <script lang="ts">
-import '/@/lib/chat/components/messages/code-copy.css';
+import '/@/lib/ui/code-copy.css';
 
 import { faBan, faCheck, faCircleNotch, faExclamationTriangle } from '@fortawesome/free-solid-svg-icons';
 import { Button } from '@podman-desktop/ui-svelte';
 import { Icon } from '@podman-desktop/ui-svelte/icons';
 
-import { codeCopyButtons } from '/@/lib/chat/components/messages/code-copy-action';
 import Markdown from '/@/lib/markdown/Markdown.svelte';
+import { codeCopyButtons } from '/@/lib/ui/code-copy-action';
 import type { AcpFlowToolCallEvent } from '/@api/acp-session-info';
 
 import AcpCopyButton from './AcpCopyButton.svelte';

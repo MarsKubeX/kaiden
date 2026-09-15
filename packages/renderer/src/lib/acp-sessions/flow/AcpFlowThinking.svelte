@@ -1,12 +1,12 @@
 <script lang="ts">
-import '/@/lib/chat/components/messages/code-copy.css';
+import '/@/lib/ui/code-copy.css';
 
 import { faChevronDown, faChevronRight } from '@fortawesome/free-solid-svg-icons';
 import { Icon } from '@podman-desktop/ui-svelte/icons';
 import humanizeDuration from 'humanize-duration';
 
-import { codeCopyButtons } from '/@/lib/chat/components/messages/code-copy-action';
 import Markdown from '/@/lib/markdown/Markdown.svelte';
+import { codeCopyButtons } from '/@/lib/ui/code-copy-action';
 import type { AcpFlowThinkingEvent } from '/@api/acp-session-info';
 
 interface Props {
