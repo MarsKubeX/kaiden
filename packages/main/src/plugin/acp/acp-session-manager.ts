@@ -525,6 +525,9 @@ export class AcpSessionManager {
           session.info.cost = (flowEvent as Extract<AcpFlowEvent, { kind: 'cost_update' }>).cost;
         }
         session.info.updatedAt = Date.now();
+        if (!flowEvent) {
+          this.apiSender.send('acp-session-update');
+        }
         break;
       }
       case 'current_mode_update': {
@@ -983,8 +986,12 @@ export class AcpSessionManager {
     });
 
     session.info.currentModelId = modelId;
+    this.resetContextUsageData(session);
     session.info.updatedAt = Date.now();
     this.apiSender.send('acp-session-update');
+    this.saveToDisk(sessionId).catch((err: unknown) => {
+      console.error(`[ACP] Failed to persist session "${sessionId}":`, err);
+    });
   }
 
   async setSessionMode(sessionId: string, modeId: string): Promise<void> {
@@ -1009,6 +1016,8 @@ export class AcpSessionManager {
       throw new Error(`Session "${sessionId}" not found or not initialized`);
     }
 
+    const isModelOption = session.info.configOptions?.some(opt => opt.id === configId && opt.category === 'model');
+
     const params =
       typeof value === 'boolean'
         ? { sessionId: session.acpSessionId, configId, type: 'boolean' as const, value }
@@ -1016,8 +1025,21 @@ export class AcpSessionManager {
 
     const response = await session.connection.setSessionConfigOption(params);
     session.info.configOptions = this.mapConfigOptions(response.configOptions);
+
+    if (isModelOption) {
+      this.resetContextUsageData(session);
+    }
+
     session.info.updatedAt = Date.now();
     this.apiSender.send('acp-session-update');
+    this.saveToDisk(sessionId).catch((err: unknown) => {
+      console.error(`[ACP] Failed to persist session "${sessionId}":`, err);
+    });
+  }
+
+  private resetContextUsageData(session: AcpSession): void {
+    session.info.contextUsed = undefined;
+    session.info.contextSize = undefined;
   }
 
   private mapConfigOptions(sdkOptions: acp.SessionConfigOption[]): AcpSessionConfigOption[] {

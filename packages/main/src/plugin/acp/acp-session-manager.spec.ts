@@ -970,6 +970,252 @@ describe('AcpSessionManager', () => {
     });
   });
 
+  describe('setSessionModel', () => {
+    test('resets contextUsed and contextSize to undefined after model switch', async () => {
+      const { existsSync } = await import('node:fs');
+      const { readdir, readFile, writeFile } = await import('node:fs/promises');
+
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(writeFile).mockResolvedValue();
+      vi.mocked(readdir).mockResolvedValue(['session-model.json' as never]);
+
+      const storedSession = {
+        info: {
+          id: 'session-model',
+          sandboxName: 'sb',
+          sandboxId: 'sb-id',
+          prompt: 'hello',
+          status: 'completed' as const,
+          createdAt: 1000,
+          updatedAt: 2000,
+          currentModelId: 'old-200k-model',
+          contextSize: 200_000,
+          contextUsed: 50_000,
+        },
+        events: [],
+        acpSessionId: 'acp-model-test',
+        agentCommand: ['openclaw', 'acp'],
+      };
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify(storedSession));
+
+      await manager.init();
+
+      // Inject a mock connection into the session
+      const mockSendRequest = vi.fn().mockResolvedValue({});
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sessions = (manager as any).sessions as Map<string, any>;
+      const session = sessions.get('session-model');
+      session.connection = { connection: { sendRequest: mockSendRequest } };
+
+      await manager.setSessionModel('session-model', 'new-1m-model');
+
+      const listed = await manager.listSessions();
+      const updated = listed.find(s => s.id === 'session-model');
+
+      expect(updated?.currentModelId).toBe('new-1m-model');
+      expect(updated?.contextSize).toBeUndefined();
+      expect(updated?.contextUsed).toBeUndefined();
+      expect(mockSendRequest).toHaveBeenCalledWith('session/set_model', {
+        sessionId: 'acp-model-test',
+        modelId: 'new-1m-model',
+      });
+      expect(apiSender.send).toHaveBeenCalledWith('acp-session-update');
+
+      await vi.waitFor(() => {
+        expect(writeFile).toHaveBeenCalledWith(
+          join(FAKE_SESSIONS_DIR, 'session-model.json'),
+          expect.stringContaining('"new-1m-model"'),
+          'utf-8',
+        );
+      });
+    });
+  });
+
+  describe('setSessionConfigOption', () => {
+    test('resets contextUsed and contextSize to undefined when config option category is model', async () => {
+      const { existsSync } = await import('node:fs');
+      const { readdir, readFile, writeFile } = await import('node:fs/promises');
+
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(writeFile).mockResolvedValue();
+      vi.mocked(readdir).mockResolvedValue(['session-config.json' as never]);
+
+      const storedSession = {
+        info: {
+          id: 'session-config',
+          sandboxName: 'sb',
+          sandboxId: 'sb-id',
+          prompt: 'hello',
+          status: 'completed' as const,
+          createdAt: 1000,
+          updatedAt: 2000,
+          currentModelId: 'old-model',
+          contextSize: 200_000,
+          contextUsed: 50_000,
+          configOptions: [
+            {
+              id: 'model-selector',
+              name: 'Model',
+              category: 'model',
+              type: 'select' as const,
+              currentValue: 'old-model',
+            },
+          ],
+        },
+        events: [],
+        acpSessionId: 'acp-config-test',
+        agentCommand: ['openclaw', 'acp'],
+      };
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify(storedSession));
+
+      await manager.init();
+
+      // Inject a mock connection with setSessionConfigOption
+      const mockSetSessionConfigOption = vi.fn().mockResolvedValue({
+        configOptions: [
+          {
+            id: 'model-selector',
+            name: 'Model',
+            category: 'model',
+            type: 'select',
+            currentValue: 'new-model',
+            options: [],
+          },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sessions = (manager as any).sessions as Map<string, any>;
+      const session = sessions.get('session-config');
+      session.connection = { setSessionConfigOption: mockSetSessionConfigOption };
+
+      await manager.setSessionConfigOption('session-config', 'model-selector', 'new-model');
+
+      const listed = await manager.listSessions();
+      const updated = listed.find(s => s.id === 'session-config');
+
+      expect(updated?.contextSize).toBeUndefined();
+      expect(updated?.contextUsed).toBeUndefined();
+      expect(apiSender.send).toHaveBeenCalledWith('acp-session-update');
+
+      await vi.waitFor(() => {
+        expect(writeFile).toHaveBeenCalledWith(
+          join(FAKE_SESSIONS_DIR, 'session-config.json'),
+          expect.any(String),
+          'utf-8',
+        );
+      });
+    });
+
+    test('preserves context data when config option category is not model', async () => {
+      const { existsSync } = await import('node:fs');
+      const { readdir, readFile, writeFile } = await import('node:fs/promises');
+
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(writeFile).mockResolvedValue();
+      vi.mocked(readdir).mockResolvedValue(['session-config-other.json' as never]);
+
+      const storedSession = {
+        info: {
+          id: 'session-config-other',
+          sandboxName: 'sb',
+          sandboxId: 'sb-id',
+          prompt: 'hello',
+          status: 'completed' as const,
+          createdAt: 1000,
+          updatedAt: 2000,
+          currentModelId: 'some-model',
+          contextSize: 200_000,
+          contextUsed: 50_000,
+          configOptions: [
+            {
+              id: 'theme-option',
+              name: 'Theme',
+              category: 'appearance',
+              type: 'select' as const,
+              currentValue: 'dark',
+            },
+          ],
+        },
+        events: [],
+        acpSessionId: 'acp-config-other-test',
+        agentCommand: ['openclaw', 'acp'],
+      };
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify(storedSession));
+
+      await manager.init();
+
+      const mockSetSessionConfigOption = vi.fn().mockResolvedValue({
+        configOptions: [
+          {
+            id: 'theme-option',
+            name: 'Theme',
+            category: 'appearance',
+            type: 'select',
+            currentValue: 'light',
+            options: [],
+          },
+        ],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sessions = (manager as any).sessions as Map<string, any>;
+      const session = sessions.get('session-config-other');
+      session.connection = { setSessionConfigOption: mockSetSessionConfigOption };
+
+      await manager.setSessionConfigOption('session-config-other', 'theme-option', 'light');
+
+      const listed = await manager.listSessions();
+      const updated = listed.find(s => s.id === 'session-config-other');
+
+      expect(updated?.contextSize).toBe(200_000);
+      expect(updated?.contextUsed).toBe(50_000);
+    });
+  });
+
+  describe('usage_update notification', () => {
+    test('notifies subscribers for cost-free usage_update events', async () => {
+      const { existsSync } = await import('node:fs');
+      const { readdir, readFile } = await import('node:fs/promises');
+
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readdir).mockResolvedValue(['session-usage.json' as never]);
+
+      const storedSession = {
+        info: {
+          id: 'session-usage',
+          sandboxName: 'sb',
+          sandboxId: 'sb-id',
+          prompt: 'hello',
+          status: 'running' as const,
+          createdAt: 1000,
+          updatedAt: 2000,
+        },
+        events: [],
+        acpSessionId: 'acp-usage-test',
+        agentCommand: ['openclaw', 'acp'],
+      };
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify(storedSession));
+
+      await manager.init();
+
+      vi.mocked(apiSender.send).mockClear();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (manager as any).handleSessionUpdate('session-usage', {
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 10_000,
+          size: 128_000,
+        },
+      });
+
+      const listed = await manager.listSessions();
+      const updated = listed.find(s => s.id === 'session-usage');
+      expect(updated?.contextUsed).toBe(10_000);
+      expect(updated?.contextSize).toBe(128_000);
+      expect(apiSender.send).toHaveBeenCalledWith('acp-session-update');
+    });
+  });
+
   async function setupPtySession(): Promise<{
     sessionId: string;
     emitStderr: (data: string) => void;
