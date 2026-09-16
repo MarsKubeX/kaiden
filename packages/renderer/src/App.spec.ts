@@ -21,9 +21,8 @@ import { render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get, writable } from 'svelte/store';
 import { router } from 'tinro';
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { showChatWindow } from '/@/stores/chat-window';
 import * as kubernetesNoCurrentContext from '/@/stores/kubernetes-no-current-context';
 
 import App from './App.svelte';
@@ -36,7 +35,6 @@ const mocks = vi.hoisted(() => ({
   SubmenuNavigation: vi.fn(),
   DeploymentsList: vi.fn(),
   KubernetesDashboard: vi.fn(),
-  CustomChat: vi.fn(),
 }));
 
 vi.mock('./lib/image/RunImage.svelte', () => ({
@@ -44,10 +42,6 @@ vi.mock('./lib/image/RunImage.svelte', () => ({
 }));
 vi.mock('./lib/image/ImagesList.svelte', () => ({
   default: mocks.ImagesList,
-}));
-
-vi.mock('./lib/chat/route/CustomChat.svelte', () => ({
-  default: mocks.CustomChat,
 }));
 
 vi.mock('./lib/ui/TitleBar.svelte', () => ({
@@ -91,7 +85,6 @@ const messages = new Map<string, (args: unknown) => void>();
 beforeEach(() => {
   vi.resetAllMocks();
   sessionStorage.clear();
-  showChatWindow.set(true);
   router.goto('/');
   (window.events as unknown) = {
     receive: vi.fn().mockImplementation((channel, func) => {
@@ -100,18 +93,12 @@ beforeEach(() => {
   };
   Object.defineProperty(window, 'dispatchEvent', { value: dispatchEventMock });
   (window.getConfigurationValue as unknown) = vi.fn();
-  vi.mocked(window.inferenceGetChats).mockResolvedValue([]);
   vi.mocked(kubernetesNoCurrentContext).kubernetesNoCurrentContext = writable(false);
-});
-
-afterEach(() => {
-  showChatWindow.set(false);
 });
 
 test('test /image/run/* route', async () => {
   render(App);
   expect(mocks.RunImage).not.toHaveBeenCalled();
-  expect(mocks.CustomChat).toHaveBeenCalled();
   router.goto('/image/run/basic');
   await tick();
   expect(mocks.RunImage).toHaveBeenCalled();
@@ -120,7 +107,6 @@ test('test /image/run/* route', async () => {
 test('test /images/:id/:engineId route', async () => {
   render(App);
   expect(mocks.ImagesList).not.toHaveBeenCalled();
-  expect(mocks.CustomChat).toHaveBeenCalled();
   router.goto('/images/an-image/an-engine');
   await tick();
   expect(mocks.ImagesList).toHaveBeenCalled();
@@ -196,11 +182,9 @@ test('receive show-release-notes event from main', async () => {
   render(App);
 
   messages.get('show-release-notes');
-
-  expect(mocks.CustomChat).toBeCalled();
 });
 
-test('leaving Chat Page saves it in lastPage storage', async () => {
+test('navigating between pages updates lastPage', async () => {
   navigationRegistry.set([
     {
       name: 'Pods',
@@ -230,19 +214,10 @@ test('leaving Chat Page saves it in lastPage storage', async () => {
 
   router.goto('/pods');
   await tick();
-  expect(get(lastPage).name).equals('Chat');
 
   router.goto('/images');
   await tick();
   expect(get(lastPage).name).equals('Pods');
-
-  router.goto('/');
-  await tick();
-  expect(get(lastPage).name).equals('Images');
-
-  router.goto('/pods');
-  await tick();
-  expect(get(lastPage).name).equals('Chat');
 });
 
 describe('route persistence across reloads', () => {

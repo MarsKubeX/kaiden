@@ -3,7 +3,6 @@ import './app.css';
 import '@fortawesome/fontawesome-free/css/all.min.css';
 
 import { tablePersistence } from '@podman-desktop/ui-svelte';
-import { onDestroy } from 'svelte';
 import { router } from 'tinro';
 
 import AcpSessionDetail from '/@/lib/acp-sessions/AcpSessionDetail.svelte';
@@ -24,7 +23,6 @@ import RAGEnvironmentDetails from '/@/lib/rag/RAGEnvironmentDetails.svelte';
 import RAGEnvironmentList from '/@/lib/rag/RAGEnvironmentList.svelte';
 import PinActions from '/@/lib/statusbar/PinActions.svelte';
 import { handleNavigation } from '/@/navigation';
-import { showChatWindow } from '/@/stores/chat-window';
 import { kubernetesNoCurrentContext } from '/@/stores/kubernetes-no-current-context';
 import type { KubernetesNavigationRequest } from '/@api/kubernetes-navigation';
 import type { NavigationRequest } from '/@api/navigation-request';
@@ -32,7 +30,6 @@ import type { NavigationRequest } from '/@api/navigation-request';
 import AppNavigation from './AppNavigation.svelte';
 import { navigateTo } from './kubernetesNavigation';
 import Appearance from './lib/appearance/Appearance.svelte';
-import CustomChat from './lib/chat/route/CustomChat.svelte';
 import ComposeDetails from './lib/compose/ComposeDetails.svelte';
 import ConfigMapDetails from './lib/configmaps-secrets/ConfigMapDetails.svelte';
 import ConfigMapSecretList from './lib/configmaps-secrets/ConfigMapSecretList.svelte';
@@ -119,27 +116,6 @@ let savedSettingsPage: string | undefined = sessionStorage.getItem(SETTINGS_PAGE
 //remember from where we come to preference pages
 let nonSettingsPage = savedRoute ?? '/';
 
-function isChatRoute(url: string): boolean {
-  return url === '/' || url.startsWith('/chat');
-}
-
-// When chat setting loads, redirect as needed.
-// undefined = still loading (no redirect), false = disabled, true = enabled.
-let chatConfigLoaded = false;
-let currentUrl: string | undefined;
-const unsubscribeShowChatWindow = showChatWindow.subscribe(value => {
-  if (value === undefined) return;
-  if (value === false && currentUrl !== undefined && isChatRoute(currentUrl)) {
-    router.goto('/agent-workspaces');
-  } else if (value === true && !chatConfigLoaded && currentUrl === '/') {
-    // Force tinro to re-match after chat routes mount on initial load
-    router.goto('/');
-  }
-  chatConfigLoaded = true;
-});
-
-onDestroy(unsubscribeShowChatWindow);
-
 // tinro fires router.subscribe synchronously with the current state on setup,
 // and WelcomePage always calls router.goto('/') in its onMount (even on reload).
 // We use that guaranteed '/' event as the trigger to restore the pre-reload
@@ -150,8 +126,6 @@ router.subscribe(function (navigation) {
   if (!subscribeReady) return;
   if (navigation.url === undefined || navigation.url.includes('.html')) return;
   if (!navigation.url.startsWith('/')) return;
-
-  currentUrl = navigation.url;
 
   if ((savedRoute !== undefined || savedSettingsPage !== undefined) && navigation.url === '/') {
     if (savedRoute) {
@@ -175,11 +149,6 @@ router.subscribe(function (navigation) {
     sessionStorage.setItem(LAST_ROUTE_KEY, navigation.url);
     sessionStorage.removeItem(SETTINGS_PAGE_KEY);
     nonSettingsPage = navigation.url;
-  }
-
-  // Guard: redirect away from chat routes when chat is disabled
-  if ($showChatWindow === false && isChatRoute(navigation.url)) {
-    router.goto('/agent-workspaces');
   }
 });
 subscribeReady = true;
@@ -241,18 +210,6 @@ tablePersistence.storage = new PodmanDesktopStoragePersist();
         <ToastHandler />
         <ToastTaskNotifications />
         <NoUsableGatewayWarning />
-        {#if $showChatWindow}
-        <Route path="/" breadcrumb="Chat" navigationHint="root">
-          <CustomChat />
-        </Route>
-        <Route path="/chat" breadcrumb="Chat">
-          <CustomChat />
-        </Route>
-        <Route path="/chat/:chatId/*" let:meta breadcrumb="Chat">
-          <CustomChat chatId={meta.params.chatId} />
-        </Route>
-        {/if}
-
         <Route path="/acp-sessions/*" breadcrumb="Agents" navigationHint="root" firstmatch>
           <Route path="/" breadcrumb="Agents" navigationHint="root">
             <AcpSessionLayout>

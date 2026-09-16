@@ -46,7 +46,6 @@ export type FlowParameter = FlowParameterAIGenerated & {
  * Parameters for the detect flow fields request
  */
 export interface DetectFlowFieldsParams {
-  chatId?: string; // Optional - if provided, analyzes chat + prompt; if not, analyzes prompt only
   prompt: string;
   providerId: string;
   connectionId: string;

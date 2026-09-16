@@ -41,7 +41,7 @@ import type {
   V1Service,
 } from '@kubernetes/client-node';
 import type * as containerDesktopAPI from '@openkaiden/api';
-import type { DynamicToolUIPart, UIMessageChunk } from 'ai';
+import type { DynamicToolUIPart } from 'ai';
 import { contextBridge, ipcRenderer } from 'electron';
 
 import type {
@@ -60,7 +60,6 @@ import type {
 } from '/@api/agent-workspace-info';
 import type { ApiSenderType } from '/@api/api-sender/api-sender-type';
 import type { AuthenticationProviderInfo } from '/@api/authentication/authentication';
-import type { Chat, Message } from '/@api/chat/schema.js';
 import type { CliToolInfo } from '/@api/cli-tool-info';
 import type { ColorInfo } from '/@api/color-info';
 import type { CommandInfo } from '/@api/command-info';
@@ -1589,33 +1588,6 @@ export function initExposure(): void {
     },
   );
 
-  contextBridge.exposeInMainWorld('inferenceGetChats', async (): Promise<Chat[]> => {
-    return ipcInvoke('inference:getChats');
-  });
-
-  contextBridge.exposeInMainWorld(
-    'inferenceGetChatMessagesById',
-    async (chatId: string): Promise<{ chat: Chat | undefined; messages: Message[] }> => {
-      return ipcInvoke('inference:getChatMessagesById', chatId);
-    },
-  );
-
-  contextBridge.exposeInMainWorld('inferenceDeleteChat', async (chatId: string): Promise<Chat | undefined> => {
-    return ipcInvoke('inference:deleteChat', chatId);
-  });
-
-  contextBridge.exposeInMainWorld('inferenceRenameChat', async (chatId: string, title: string): Promise<undefined> => {
-    return ipcInvoke('inference:renameChat', chatId, title);
-  });
-
-  contextBridge.exposeInMainWorld('inferenceDeleteAllChats', async (): Promise<undefined> => {
-    return ipcInvoke('inference:deleteAllChats');
-  });
-
-  contextBridge.exposeInMainWorld('inferenceDeleteTrailingMessages', async (id: string): Promise<undefined> => {
-    return ipcInvoke('inference:deleteTrailingMessages', id);
-  });
-
   contextBridge.exposeInMainWorld('inferenceGenerate', async (params: InferenceParameters): Promise<string> => {
     return ipcInvoke('inference:generate', params);
   });
@@ -1705,187 +1677,6 @@ export function initExposure(): void {
       );
     },
   );
-
-  // callbacks for streamText
-  let onDataCallbacksStreamTextId = 0;
-  const onDataCallbacksStreamText = new Map<
-    number,
-    { onChunk: (chunk: UIMessageChunk) => void; onError: (error: string) => void; onEnd: () => void }
-  >();
-
-  // Grace period to keep buffered chunks after stream completion, allowing late reconnection
-  const STREAM_BUFFER_TTL_MS = 30_000;
-
-  // Track active streams by chatId and buffer chunks for background streams
-  const activeStreamsByChatId = new Map<
-    string,
-    {
-      onDataId: number;
-      bufferedChunks: UIMessageChunk[];
-      isComplete: boolean;
-      error?: string;
-    }
-  >();
-  contextBridge.exposeInMainWorld(
-    'inferenceStreamText',
-    (
-      params: InferenceParameters & { chatId: string },
-      onChunk: (data: UIMessageChunk) => void,
-      onError: (error: string) => void,
-      onEnd: () => void,
-    ): number => {
-      onDataCallbacksStreamTextId++;
-      const id = onDataCallbacksStreamTextId;
-      onDataCallbacksStreamText.set(id, { onChunk, onError, onEnd });
-
-      // Track this stream by chatId
-      activeStreamsByChatId.set(params.chatId, {
-        onDataId: id,
-        bufferedChunks: [],
-        isComplete: false,
-      });
-
-      ipcInvoke('inference:streamText', { ...params, onDataId: id }).catch((err: unknown) => {
-        const callback = onDataCallbacksStreamText.get(id);
-        if (callback) {
-          onDataCallbacksStreamText.delete(id);
-          try {
-            callback.onError(String(err));
-          } finally {
-            callback.onEnd();
-          }
-        }
-        const streamState = activeStreamsByChatId.get(params.chatId);
-        if (streamState?.onDataId === id) {
-          streamState.error = String(err);
-          streamState.isComplete = true;
-          if (callback) {
-            streamState.bufferedChunks = [];
-          }
-          setTimeout(() => {
-            if (activeStreamsByChatId.get(params.chatId)?.onDataId === id) {
-              activeStreamsByChatId.delete(params.chatId);
-            }
-          }, STREAM_BUFFER_TTL_MS);
-        }
-      });
-      return id;
-    },
-  );
-
-  contextBridge.exposeInMainWorld('inferenceStopStream', async (onDataId: number): Promise<void> => {
-    return ipcInvoke('inference:stopStream', onDataId);
-  });
-
-  contextBridge.exposeInMainWorld(
-    'inferenceGetActiveStream',
-    (chatId: string): { onDataId: number; bufferedChunks: UIMessageChunk[]; isComplete: boolean } | null => {
-      const streamState = activeStreamsByChatId.get(chatId);
-      return streamState ? { ...streamState } : null;
-    },
-  );
-
-  contextBridge.exposeInMainWorld(
-    'inferenceReconnectToStream',
-    (
-      chatId: string,
-      onChunk: (data: UIMessageChunk) => void,
-      onError: (error: string) => void,
-      onEnd: () => void,
-    ): { bufferedChunks: UIMessageChunk[]; onDataId: number } | null => {
-      const streamState = activeStreamsByChatId.get(chatId);
-      if (!streamState) {
-        return null;
-      }
-
-      // Register callbacks for this stream
-      onDataCallbacksStreamText.set(streamState.onDataId, { onChunk, onError, onEnd });
-
-      // Return buffered chunks to be replayed (keep them for potential re-reconnection)
-      const bufferedChunks = [...streamState.bufferedChunks];
-
-      // If stream completed while disconnected, trigger onEnd
-      if (streamState.isComplete) {
-        // Trigger after buffered chunks are processed
-        setTimeout(() => {
-          if (streamState.error) {
-            onError(streamState.error);
-          } else {
-            onEnd();
-          }
-          onDataCallbacksStreamText.delete(streamState.onDataId);
-        }, 0);
-      }
-
-      return {
-        bufferedChunks,
-        onDataId: streamState.onDataId,
-      };
-    },
-  );
-
-  contextBridge.exposeInMainWorld('inferenceDisconnectFromStream', (onDataId: number): void => {
-    // Remove the active callback, but keep stream state for buffering
-    onDataCallbacksStreamText.delete(onDataId);
-  });
-
-  ipcRenderer.on('inference:streamText-onChunk', (_, callbackId: number, chunk: UIMessageChunk) => {
-    // Always buffer chunks for potential reconnection
-    for (const [, streamState] of activeStreamsByChatId.entries()) {
-      if (streamState.onDataId === callbackId) {
-        streamState.bufferedChunks.push(chunk);
-        break;
-      }
-    }
-
-    // Deliver to active callback if present
-    const callback = onDataCallbacksStreamText.get(callbackId);
-    if (callback) {
-      callback.onChunk(chunk);
-    }
-  });
-  ipcRenderer.on('inference:streamText-onError', (_, callbackId: number, error: string) => {
-    // grab callback from the map
-    const callback = onDataCallbacksStreamText.get(callbackId);
-    if (callback) {
-      callback.onError(error);
-    }
-
-    // Mark stream as complete with error
-    for (const [, streamState] of activeStreamsByChatId.entries()) {
-      if (streamState.onDataId === callbackId) {
-        streamState.error = error;
-        streamState.isComplete = true;
-        break;
-      }
-    }
-  });
-
-  ipcRenderer.on('inference:streamText-onEnd', (_, callbackId: number) => {
-    const callback = onDataCallbacksStreamText.get(callbackId);
-    if (callback) {
-      callback.onEnd();
-      onDataCallbacksStreamText.delete(callbackId);
-    }
-
-    for (const [chatId, streamState] of activeStreamsByChatId.entries()) {
-      if (streamState.onDataId === callbackId) {
-        streamState.isComplete = true;
-        // Release chunk references immediately if a consumer already drained them.
-        // The entry itself stays for TTL so reconnection can detect "completed".
-        if (callback) {
-          streamState.bufferedChunks = [];
-        }
-        const completedOnDataId = callbackId;
-        setTimeout(() => {
-          if (activeStreamsByChatId.get(chatId)?.onDataId === completedOnDataId) {
-            activeStreamsByChatId.delete(chatId);
-          }
-        }, STREAM_BUFFER_TTL_MS);
-        break;
-      }
-    }
-  });
 
   ipcRenderer.on(
     'provider-registry:taskConnection-onData',

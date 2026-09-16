@@ -45,7 +45,6 @@ export class LegacyDirectories implements Directories {
   private readonly contributionStorageDirectory: string;
   private readonly safeStorageDirectory: string;
   private readonly desktopAppHomeDir: string;
-  private readonly chatPersistenceDirectory: string;
   private readonly skillsDirectory: string;
   private readonly workspaceProjectsDirectory: string;
   private readonly semanticRoutersDirectory: string;
@@ -71,7 +70,6 @@ export class LegacyDirectories implements Directories {
     this.extensionsStorageDirectory = path.resolve(this.desktopAppHomeDir, 'extensions-storage');
     this.contributionStorageDirectory = path.resolve(this.desktopAppHomeDir, 'contributions');
     this.safeStorageDirectory = path.resolve(this.desktopAppHomeDir, 'safe-storage');
-    this.chatPersistenceDirectory = path.resolve(this.desktopAppHomeDir, 'chat-persistence');
     this.skillsDirectory = path.resolve(this.desktopAppHomeDir, 'skills');
     this.workspaceProjectsDirectory = path.resolve(this.desktopAppHomeDir, 'workspace-projects');
     this.semanticRoutersDirectory = path.resolve(this.desktopAppHomeDir, 'semantic-routers');
@@ -123,10 +121,6 @@ export class LegacyDirectories implements Directories {
     }
     // Fallback to Linux-style path
     return product.paths.managed.linux;
-  }
-
-  getChatPersistenceDirectory(): string {
-    return this.chatPersistenceDirectory;
   }
 
   getSkillsDirectory(): string {

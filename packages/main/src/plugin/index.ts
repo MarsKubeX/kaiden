@@ -175,7 +175,6 @@ import type { VolumeInspectInfo, VolumeListInfo } from '/@api/volume-info.js';
 import type { WebviewInfo } from '/@api/webview-info.js';
 import type { WelcomeMessages } from '/@api/welcome-info.js';
 
-import { ChatManager } from '../chat/chat-manager.js';
 import { securityRestrictionCurrentHandler } from '../security-restrictions-handler.js';
 import { TrayMenu } from '../tray-menu.js';
 import { createHash, isMac } from '../util.js';
@@ -184,7 +183,6 @@ import { AuthenticationImpl } from './authentication.js';
 import { AutostartEngine } from './autostart-engine.js';
 import { CancellationTokenRegistry } from './cancellation-token-registry.js';
 import { Certificates } from './certificates.js';
-import { ChatInit } from './chat-init.js';
 import { CliToolRegistry } from './cli-tool-registry.js';
 import { CloseBehavior } from './close-behavior.js';
 import { ColorRegistry } from './color-registry.js';
@@ -629,7 +627,6 @@ export class PluginSystem {
     container.bind<OnboardingRegistry>(OnboardingRegistry).toSelf().inSingletonScope();
     container.bind<OnboardingInit>(OnboardingInit).toSelf().inSingletonScope();
     container.bind<KubernetesClient>(KubernetesClient).toSelf().inSingletonScope();
-    container.bind<ChatManager>(ChatManager).toSelf().inSingletonScope();
     container.bind<InferenceManager>(InferenceManager).toSelf().inSingletonScope();
     container.bind<ModelRegistry>(ModelRegistry).toSelf().inSingletonScope();
     container.bind<InferenceConnectionSummaryRegistry>(InferenceConnectionSummaryRegistry).toSelf().inSingletonScope();
@@ -732,9 +729,6 @@ export class PluginSystem {
     const inferenceManager = container.get<InferenceManager>(InferenceManager);
     inferenceManager.init();
 
-    const chatManager = container.get<ChatManager>(ChatManager);
-    await chatManager.init();
-
     providerRegistry.addProviderListener((name: string, providerInfo: ProviderInfo) => {
       if (name === 'provider:update-status') {
         apiSender.send('provider:update-status', providerInfo.name);
@@ -809,11 +803,6 @@ export class PluginSystem {
       const openDevToolsInit = container.get<OpenDevToolsInit>(OpenDevToolsInit);
       openDevToolsInit.init();
     }
-
-    // init chat configuration
-    container.bind<ChatInit>(ChatInit).toSelf().inSingletonScope();
-    const chatInit = container.get<ChatInit>(ChatInit);
-    chatInit.init();
 
     // init editor configuration
     container.bind<EditorInit>(EditorInit).toSelf().inSingletonScope();

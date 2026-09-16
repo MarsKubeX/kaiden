@@ -21,7 +21,6 @@ import { expect, type Locator, type Page } from '@playwright/test';
 import { builtInExtensions, ExtensionStatus } from '/@/model/core/types';
 import { AgentWorkspacesPage } from '/@/model/pages/agent-workspaces-page';
 import type { BasePage } from '/@/model/pages/base-page';
-import { ChatPage } from '/@/model/pages/chat-page';
 import { ExtensionsPage } from '/@/model/pages/extensions-page';
 import { KnowledgePage } from '/@/model/pages/knowledge-page';
 import { SettingsPage } from '/@/model/pages/settings-page';
@@ -29,7 +28,6 @@ import { SettingsPage } from '/@/model/pages/settings-page';
 export class NavigationBar {
   readonly page: Page;
   readonly navigationLocator: Locator;
-  readonly chatLink: Locator;
   readonly knowledgesLink: Locator;
   readonly extensionsLink: Locator;
   readonly workspacesLink: Locator;
@@ -39,12 +37,11 @@ export class NavigationBar {
   constructor(page: Page) {
     this.page = page;
     this.navigationLocator = this.page.getByRole('navigation', { name: 'AppNavigation' });
-    this.chatLink = this.navigationLocator.getByRole('link', { name: 'Chat' });
     this.knowledgesLink = this.navigationLocator.getByRole('link', { name: 'Knowledges', exact: true });
     this.extensionsLink = this.navigationLocator.getByRole('link', { name: 'Extensions', exact: true });
     this.workspacesLink = this.navigationLocator.getByRole('link', { name: 'Workspaces', exact: true });
     this.settingsLink = this.navigationLocator.getByRole('link', { name: 'Settings', exact: true });
-    this.links = [this.chatLink, this.knowledgesLink, this.extensionsLink, this.workspacesLink, this.settingsLink];
+    this.links = [this.knowledgesLink, this.extensionsLink, this.workspacesLink, this.settingsLink];
   }
 
   getAllLinks(): Locator[] {
@@ -60,26 +57,12 @@ export class NavigationBar {
     return pageInstance;
   }
 
-  async navigateToChatPage(): Promise<ChatPage> {
-    return this.navigateTo(this.chatLink, ChatPage);
-  }
-
   async navigateToKnowledgePage(): Promise<KnowledgePage> {
     return this.navigateTo(this.knowledgesLink, KnowledgePage);
   }
 
   async navigateToExtensionsPage(): Promise<ExtensionsPage> {
     return this.navigateTo(this.extensionsLink, ExtensionsPage);
-  }
-
-  async ensureChatWindowEnabled(): Promise<void> {
-    if (await this.chatLink.isVisible()) {
-      return;
-    }
-    const settingsPage = await this.navigateToSettingsPage();
-    const preferencesPage = await settingsPage.openPreferences();
-    await preferencesPage.enableChatWindow();
-    await expect(this.chatLink).toBeVisible();
   }
 
   async ensureExtensionsRunning(): Promise<void> {

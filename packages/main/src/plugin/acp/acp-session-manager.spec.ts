@@ -64,7 +64,6 @@ const directories: Directories = {
   getSafeStorageDirectory: vi.fn(),
   getDataDirectory: vi.fn(),
   getManagedDefaultsDirectory: vi.fn(),
-  getChatPersistenceDirectory: vi.fn(),
   getSkillsDirectory: vi.fn(),
   getWorkspaceProjectsDirectory: vi.fn(),
   getSemanticRoutersDirectory: vi.fn(),

@@ -26,7 +26,6 @@ export interface Directories {
   getSafeStorageDirectory(): string;
   getDataDirectory(): string;
   getManagedDefaultsDirectory(): string;
-  getChatPersistenceDirectory(): string;
   getSkillsDirectory(): string;
   getWorkspaceProjectsDirectory(): string;
   getSemanticRoutersDirectory(): string;

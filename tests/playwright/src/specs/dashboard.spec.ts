@@ -21,9 +21,8 @@ import { waitForNavigationReady } from '/@/utils/app-ready';
 
 test.describe
   .serial('App start', { tag: '@smoke' }, () => {
-    test.beforeEach(async ({ page, navigationBar }) => {
+    test.beforeEach(async ({ page }) => {
       await waitForNavigationReady(page);
-      await navigationBar.ensureChatWindowEnabled();
     });
 
     test('[APP-01] Navigation bar is visible and contains all expected navigation links', async ({ navigationBar }) => {
