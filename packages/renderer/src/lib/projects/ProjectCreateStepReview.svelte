@@ -3,7 +3,7 @@ import { faCheckCircle, faCodeBranch, faFolderOpen } from '@fortawesome/free-sol
 import { Button, Input } from '@podman-desktop/ui-svelte';
 import { Icon } from '@podman-desktop/ui-svelte/icons';
 
-import { Textarea } from '/@/lib/chat/components/ui/textarea';
+import { Textarea } from '/@/lib/ui/shadcn/textarea';
 import type { WorkspaceProjectAnalysis } from '/@api/workspace-project-info';
 
 import { formatGitUrl } from './git-url-utils';

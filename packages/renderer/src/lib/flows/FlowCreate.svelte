@@ -4,11 +4,11 @@ import { Button, ErrorMessage, Input } from '@podman-desktop/ui-svelte';
 import { generate as generateWords } from 'random-words';
 import { onMount } from 'svelte';
 
-import MCPSelector from '/@/lib/chat/components/mcp-selector.svelte';
-import ModelSelector from '/@/lib/chat/components/model-selector.svelte';
-import { Textarea } from '/@/lib/chat/components/ui/textarea';
 import { flowCreationData } from '/@/lib/flows/state/flow-creation-data.svelte';
 import FormPage from '/@/lib/ui/FormPage.svelte';
+import MCPSelector from '/@/lib/ui/shadcn/mcp-selector.svelte';
+import ModelSelector from '/@/lib/ui/shadcn/model-selector.svelte';
+import { Textarea } from '/@/lib/ui/shadcn/textarea';
 import { handleNavigation } from '/@/navigation';
 import { isFlowConnectionAvailable } from '/@/stores/flow-provider';
 import { mcpRemoteServerInfos } from '/@/stores/mcp-remote-servers';
@@ -19,7 +19,6 @@ import type { MCPRemoteServerInfo } from '/@api/mcp/mcp-server-info';
 import type { ModelInfo } from '/@api/model-registry-info';
 import { NavigationPage } from '/@api/navigation-page';
 
-import FlowIcon from '../images/FlowIcon.svelte';
 import FlowConnectionSelector from './components/flow-connection-selector.svelte';
 import InputFieldsSection from './components/InputFieldsSection.svelte';
 import NoFlowProviders from './components/NoFlowProviders.svelte';
@@ -51,9 +50,6 @@ let prompt: string = $state(flowCreationData.value?.prompt ?? '');
 let parameters = $state<InputField[]>([]); // Input fields managed manually in UI
 let flowProviderConnectionKey: string | undefined = $state<string>();
 
-// Store chatId before clearing flowCreationData (for detect fields feature)
-let chatId: string | undefined = $state(flowCreationData.value?.chatId);
-
 flowCreationData.value = undefined;
 
 // Detect fields state
@@ -62,10 +58,6 @@ let detectingFields: boolean = $state(false);
 // Can detect fields if we have a non-empty prompt
 const hasPrompt = $derived(prompt.trim().length > 0);
 
-/**
- * Detect flow fields from the prompt (and chat conversation if available).
- * Uses AI to analyze the prompt and extract parameters.
- */
 async function handleDetectFields(): Promise<void> {
   if (!selectedModel || detectingFields || !hasPrompt) return;
 
@@ -74,7 +66,6 @@ async function handleDetectFields(): Promise<void> {
 
   try {
     const result = await window.inferenceDetectFlowFields({
-      chatId,
       prompt,
       providerId: selectedModel.providerId,
       connectionId: selectedModel.connectionId,
@@ -176,8 +167,6 @@ async function generate(): Promise<void> {
           <div class="flex flex-col px-6">
             <div>You can create a flow using this form by selecting a model, one or several tools (from MCP servers)
               and specifying instructions.</div>
-            <div>A flow can also be created by exporting a chat session. All information's on this page will then automatically be filled.</div>
-            <div class="flex flex-row gap-1 items-center">The export feature in the chat window is available through the <FlowIcon /> icon</div>
           </div>
           {#if error}
             <div class="px-6">

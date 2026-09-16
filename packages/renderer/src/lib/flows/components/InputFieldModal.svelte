@@ -2,9 +2,9 @@
 import { Button, Input } from '@podman-desktop/ui-svelte';
 import { z } from 'zod';
 
-import { Textarea } from '/@/lib/chat/components/ui/textarea';
 import Dialog from '/@/lib/dialogs/Dialog.svelte';
 import { type InputField, InputFieldSchema } from '/@/lib/flows/types/input-field';
+import { Textarea } from '/@/lib/ui/shadcn/textarea';
 
 interface Props {
   field?: InputField;

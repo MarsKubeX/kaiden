@@ -2,8 +2,8 @@
 import { Button, Dropdown, ErrorMessage } from '@podman-desktop/ui-svelte';
 import { router } from 'tinro';
 
-import { Textarea } from '/@/lib/chat/components/ui/textarea';
 import Dialog from '/@/lib/dialogs/Dialog.svelte';
+import { Textarea } from '/@/lib/ui/shadcn/textarea';
 import { agentInfos } from '/@/stores/agents';
 import { allOpenshellSandboxes } from '/@/stores/openshell-sandboxes';
 import { AGENT_LABEL } from '/@api/openshell-gateway-info';

@@ -1,13 +1,7 @@
 <script lang="ts">
 import type { ClassValue } from 'svelte/elements';
 
-import { cn } from '/@/lib/chat/utils/shadcn';
-import { providerInfos } from '/@/stores/providers';
-import type { ProviderFlowConnectionInfo } from '/@api/provider-info';
-
-import CheckCircleFillIcon from '../../chat/components/icons/check-circle-fill.svelte';
-import ChevronDownIcon from '../../chat/components/icons/chevron-down.svelte';
-import { Button } from '../../chat/components/ui/button';
+import { Button } from '/@/lib/ui/shadcn/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,7 +10,12 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '../../chat/components/ui/dropdown-menu';
+} from '/@/lib/ui/shadcn/dropdown-menu';
+import CheckCircleFillIcon from '/@/lib/ui/shadcn/icons/check-circle-fill.svelte';
+import ChevronDownIcon from '/@/lib/ui/shadcn/icons/chevron-down.svelte';
+import { cn } from '/@/lib/ui/shadcn/shadcn';
+import { providerInfos } from '/@/stores/providers';
+import type { ProviderFlowConnectionInfo } from '/@api/provider-info';
 
 let {
   class: c,
