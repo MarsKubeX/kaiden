@@ -33,6 +33,7 @@ const McpServerEntrySchema = z.looseObject({
 
 const CodexConfigSchema = z.looseObject({
   model: z.string().optional(),
+  openai_base_url: z.string().optional(),
   mcp_servers: z.record(z.string(), McpServerEntrySchema).optional(),
 });
 
@@ -68,6 +69,11 @@ export async function activate(extensionContext: ExtensionContext): Promise<void
       const config = CodexConfigSchema.parse(raw ? parse(raw) : {});
 
       config.model = context.model.model.label;
+
+      const endpoint = context.model.endpoint;
+      if (endpoint) {
+        config.openai_base_url = endpoint;
+      }
 
       const mcpServers = context.workspace.mcp?.servers;
       const mcpCommands = context.workspace.mcp?.commands;

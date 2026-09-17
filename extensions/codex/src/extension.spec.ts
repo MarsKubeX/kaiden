@@ -51,16 +51,18 @@ function createContext(
   configFiles: AgentConfigurationFile[],
   options: {
     modelLabel?: string;
+    endpoint?: string;
     mcp?: {
       servers?: { name: string; url: string; headers?: Record<string, string> }[];
       commands?: { name: string; command: string; args?: string[]; env?: Record<string, string> }[];
     };
   } = {},
 ): AgentWorkspaceContext {
-  const { modelLabel = 'gpt-4o', mcp } = options;
+  const { modelLabel = 'gpt-4o', endpoint, mcp } = options;
   return {
     model: {
       model: { label: modelLabel },
+      ...(endpoint !== undefined ? { endpoint } : {}),
     },
     configurationFiles: configFiles,
     workspace: { ...(mcp ? { mcp } : {}) },
@@ -372,6 +374,62 @@ describe('activate', () => {
       const written = parseWrittenToml(configFile.updateMock);
       expect(written.mcp_servers).toEqual({
         minimal: { command: 'my-server', args: [] },
+      });
+    });
+
+    test('writes openai_base_url when model has a custom endpoint', async () => {
+      await activate(extensionContextMock);
+      const agent = getRegisteredAgent();
+
+      const configFile = createConfigFile();
+      const ctx = createContext([configFile], { endpoint: 'https://my-custom-host.local/v1' });
+      await agent.preWorkspaceStart(ctx);
+
+      expect(parseWrittenToml(configFile.updateMock)).toEqual({
+        model: 'gpt-4o',
+        openai_base_url: 'https://my-custom-host.local/v1',
+      });
+    });
+
+    test('does not write openai_base_url when no endpoint is provided', async () => {
+      await activate(extensionContextMock);
+      const agent = getRegisteredAgent();
+
+      const configFile = createConfigFile();
+      const ctx = createContext([configFile]);
+      await agent.preWorkspaceStart(ctx);
+
+      expect(parseWrittenToml(configFile.updateMock)).toEqual({ model: 'gpt-4o' });
+    });
+
+    test('replaces existing openai_base_url with the model endpoint', async () => {
+      await activate(extensionContextMock);
+      const agent = getRegisteredAgent();
+
+      const configFile = createConfigFile(
+        stringify({ model: 'old-model', openai_base_url: 'https://old-endpoint.local/v1' }),
+      );
+      const ctx = createContext([configFile], { endpoint: 'https://custom.example.com/v1' });
+      await agent.preWorkspaceStart(ctx);
+
+      expect(parseWrittenToml(configFile.updateMock)).toEqual({
+        model: 'gpt-4o',
+        openai_base_url: 'https://custom.example.com/v1',
+      });
+    });
+
+    test('preserves other configuration when writing openai_base_url', async () => {
+      await activate(extensionContextMock);
+      const agent = getRegisteredAgent();
+
+      const configFile = createConfigFile(stringify({ approval_policy: 'on-request' }));
+      const ctx = createContext([configFile], { endpoint: 'https://new-endpoint.local/v1' });
+      await agent.preWorkspaceStart(ctx);
+
+      expect(parseWrittenToml(configFile.updateMock)).toEqual({
+        model: 'gpt-4o',
+        openai_base_url: 'https://new-endpoint.local/v1',
+        approval_policy: 'on-request',
       });
     });
   });
