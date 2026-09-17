@@ -23,13 +23,13 @@ import { basename, extname, join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 
 import * as acp from '@agentclientprotocol/sdk';
+import type { ExecInteractiveSession } from '@nvidia/openshell-sdk';
 import { inject, injectable, preDestroy } from 'inversify';
-import type { IPty } from 'node-pty';
-import { spawn as ptySpawn } from 'node-pty';
 
 import { AgentRegistry } from '/@/plugin/agent-registry.js';
 import { Directories } from '/@/plugin/directories.js';
 import { OpenshellCli } from '/@/plugin/openshell-cli/openshell-cli.js';
+import { OpenshellSdkClientManager } from '/@/plugin/openshell-cli/openshell-sdk-client-manager.js';
 import type {
   AcpAttachment,
   AcpElicitationResponseData,
@@ -69,7 +69,8 @@ interface UploadedAttachment extends AcpAttachment {
 
 interface AcpSession {
   info: AcpSessionInfo;
-  ptyProcess: IPty;
+  execSession: ExecInteractiveSession;
+  abortController: AbortController;
   connection: acp.ClientSideConnection;
   acpSessionId?: string;
   events: AcpFlowEvent[];
@@ -91,6 +92,7 @@ export class AcpSessionManager {
     @inject(OpenshellCli) private readonly openshellCli: OpenshellCli,
     @inject(AgentRegistry) private readonly agentRegistry: AgentRegistry,
     @inject(Directories) private readonly directories: Directories,
+    @inject(OpenshellSdkClientManager) private readonly openshellSdkClientManager: OpenshellSdkClientManager,
   ) {}
 
   async init(): Promise<void> {
@@ -119,79 +121,57 @@ export class AcpSessionManager {
     return { agentInfo, command };
   }
 
-  private ptyToStreams(
-    pty: IPty,
+  private sdkSessionToStreams(
+    execSession: ExecInteractiveSession,
     label: string,
     stderrLines: string[],
   ): { input: WritableStream<Uint8Array>; output: ReadableStream<Uint8Array> } {
-    const encoder = new TextEncoder();
-    const sentMessages = new Set<string>();
-
     const input = new WritableStream<Uint8Array>({
       write(chunk): void {
-        const text = new TextDecoder().decode(chunk);
-        for (const line of text.split('\n').filter(l => l.trim())) {
-          debugPty(`${label} >>> ${line.slice(0, 200)}`);
-          try {
-            sentMessages.add(JSON.stringify(JSON.parse(line.trim())));
-          } catch {
-            // not JSON, skip echo tracking
-          }
-        }
-        pty.write(text.replace(/\n/g, '\r'));
+        const buffer = Buffer.from(chunk);
+        debugPty(`${label} >>> ${buffer}`);
+        execSession.write(buffer);
       },
     });
 
-    let outputController: ReadableStreamDefaultController<Uint8Array>;
+    let outputController!: ReadableStreamDefaultController<Uint8Array>;
     const output = new ReadableStream<Uint8Array>({
       start(controller): void {
         outputController = controller;
       },
     });
 
-    let buffer = '';
-    let jsonAssembly = '';
-    pty.onData((data: string) => {
-      buffer += data;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const raw of lines) {
-        const cleaned = raw.replace(/\r/g, '').trim();
-        if (!cleaned) continue;
-
-        if (jsonAssembly) {
-          jsonAssembly += cleaned;
-        } else if (cleaned.startsWith('{')) {
-          jsonAssembly = cleaned;
-        } else {
-          console.error(`[ACP ${label}] stderr: ${cleaned}`);
-          if (stderrLines.length >= MAX_STDERR_LINES) {
-            stderrLines.shift();
-          }
-          stderrLines.push(stripVTControlCharacters(cleaned));
-          continue;
+    (async (): Promise<void> => {
+      for await (const event of execSession.output) {
+        if ('type' in event) {
+          break;
         }
-
-        try {
-          JSON.parse(jsonAssembly);
-          if (sentMessages.delete(JSON.stringify(JSON.parse(jsonAssembly)))) {
-            jsonAssembly = '';
-            continue;
+        if (event.stream === 'stdout') {
+          debugPty(`${label} <<< ${event.data.toString().slice(0, 200)}`);
+          outputController.enqueue(new Uint8Array(event.data));
+        } else {
+          const text = stripVTControlCharacters(event.data.toString().trim());
+          if (text) {
+            console.error(`[ACP ${label}] stderr: ${text}`);
+            if (stderrLines.length >= MAX_STDERR_LINES) {
+              stderrLines.shift();
+            }
+            stderrLines.push(text);
           }
-          debugPty(`${label} <<< ${jsonAssembly.slice(0, 200)}`);
-          outputController.enqueue(encoder.encode(jsonAssembly + '\n'));
-          jsonAssembly = '';
-        } catch {
-          // incomplete JSON, keep assembling
         }
       }
-    });
-
-    pty.onExit(() => {
       try {
         outputController.close();
       } catch {
         // already closed
+      }
+    })().catch((error: unknown) => {
+      console.debug(`[ACP ${label}] output stream error:`, error);
+      try {
+        outputController.close();
+      } catch {
+        // already closed
+        console.debug(`[ACP ${label}] output stream error: failed to close stream`);
       }
     });
 
@@ -211,20 +191,17 @@ export class AcpSessionManager {
     const { agentInfo, command } = await this.resolveAgentCommand(options, sandbox);
 
     const sessionId = randomUUID();
-    const openshellPath = this.openshellCli.getCliPath();
 
     const gatewayName = sandbox.labels?.['gateway'];
-    const spawnArgs = ['sandbox', 'exec', '-n', sandbox.name, '--tty'];
-    if (gatewayName) {
-      spawnArgs.push('-g', gatewayName);
-    }
-    spawnArgs.push('--', ...command);
-    debugPty(`${sandbox.name} spawning: ${openshellPath} ${spawnArgs.join(' ')}`);
+    debugPty(`${sandbox.name} execInteractive: ${command.join(' ')}`);
 
-    const ptyProcess = ptySpawn(openshellPath, spawnArgs, {
-      name: 'xterm-256color',
+    const abortController = new AbortController();
+    const sdkClient = await this.openshellSdkClientManager.getClient(gatewayName);
+    const execSession = await sdkClient.sandbox.execInteractive(sandbox.name, command, {
+      tty: false,
       cols: PTY_COLS,
-      env: { ...(process.env as Record<string, string>), OPENCODE_ENABLE_QUESTION_TOOL: '1' },
+      environment: { OPENCODE_ENABLE_QUESTION_TOOL: '1' },
+      signal: abortController.signal,
     });
 
     const info: AcpSessionInfo = {
@@ -249,7 +226,7 @@ export class AcpSessionManager {
       timestamp: Date.now(),
     });
 
-    const { input, output } = this.ptyToStreams(ptyProcess, sandbox.name, stderrLines);
+    const { input, output } = this.sdkSessionToStreams(execSession, sandbox.name, stderrLines);
     const stream = acp.ndJsonStream(input, output);
 
     const clientImpl = this.createClientImpl(sessionId);
@@ -257,7 +234,8 @@ export class AcpSessionManager {
 
     const session: AcpSession = {
       info,
-      ptyProcess,
+      execSession,
+      abortController,
       connection,
       events,
       pendingRequests,
@@ -273,20 +251,33 @@ export class AcpSessionManager {
       console.error(`[ACP] Failed to persist session "${sessionId}":`, err);
     });
 
-    ptyProcess.onExit(({ exitCode }) => {
-      debugPty(`${sandbox.name} process exited with code ${exitCode}`);
-      const s = this.sessions.get(sessionId);
-      if (s) {
-        s.connectionClosed = true;
-        if (s.info.status !== 'completed' && s.info.status !== 'cancelled') {
-          this.updateSessionStatus(sessionId, exitCode === 0 ? 'completed' : 'error');
-          if (exitCode !== 0) {
-            const stderrMsg = s.stderrLines.join(' ').trim();
-            s.info.error = stderrMsg || `Process exited with code ${exitCode}`;
+    execSession.done
+      .then(exitCode => {
+        debugPty(`${sandbox.name} process exited with code ${exitCode}`);
+        const s = this.sessions.get(sessionId);
+        if (s) {
+          s.connectionClosed = true;
+          if (s.info.status !== 'completed' && s.info.status !== 'cancelled') {
+            this.updateSessionStatus(sessionId, exitCode === 0 ? 'completed' : 'error');
+            if (exitCode !== 0) {
+              const stderrMsg = s.stderrLines.join(' ').trim();
+              s.info.error = stderrMsg || `Process exited with code ${exitCode}`;
+            }
           }
         }
-      }
-    });
+      })
+      .catch((err: unknown) => {
+        debugPty(`${sandbox.name} exec error: ${err instanceof Error ? err.message : String(err)}`);
+        const s = this.sessions.get(sessionId);
+        if (s) {
+          s.connectionClosed = true;
+          if (s.info.status !== 'completed' && s.info.status !== 'cancelled') {
+            this.updateSessionStatus(sessionId, 'error');
+            const stderrMsg = s.stderrLines.join(' ').trim();
+            s.info.error = stderrMsg || (err instanceof Error ? err.message : String(err));
+          }
+        }
+      });
 
     this.startAcpSession(sessionId, options.prompt).catch((err: unknown) => {
       console.error(`[ACP ${sandbox.name}] session start failed:`, err);
@@ -695,45 +686,58 @@ export class AcpSessionManager {
       throw new Error(`Cannot reconnect session "${sessionId}": agent command is unknown`);
     }
 
-    const openshellPath = this.openshellCli.getCliPath();
-    const reconnectArgs = ['sandbox', 'exec', '-n', session.info.sandboxName, '--tty'];
-    if (session.gatewayName) {
-      reconnectArgs.push('-g', session.gatewayName);
-    }
-    reconnectArgs.push('--', ...session.agentCommand);
-    debugPty(`${session.info.sandboxName} spawning: ${openshellPath} ${reconnectArgs.join(' ')}`);
+    this.closeExecSession(session);
 
-    const ptyProcess = ptySpawn(openshellPath, reconnectArgs, {
-      name: 'xterm-256color',
+    debugPty(`${session.info.sandboxName} reconnecting via execInteractive: ${session.agentCommand.join(' ')}`);
+
+    const abortController = new AbortController();
+    const sdkClient = await this.openshellSdkClientManager.getClient(session.gatewayName);
+    const execSession = await sdkClient.sandbox.execInteractive(session.info.sandboxName, session.agentCommand, {
+      tty: false,
       cols: PTY_COLS,
-      env: { ...(process.env as Record<string, string>), OPENCODE_ENABLE_QUESTION_TOOL: '1' },
+      environment: { OPENCODE_ENABLE_QUESTION_TOOL: '1' },
+      signal: abortController.signal,
     });
 
     session.stderrLines.length = 0;
 
-    const { input, output } = this.ptyToStreams(ptyProcess, session.info.sandboxName, session.stderrLines);
+    const { input, output } = this.sdkSessionToStreams(execSession, session.info.sandboxName, session.stderrLines);
     const stream = acp.ndJsonStream(input, output);
     const clientImpl = this.createClientImpl(sessionId);
     const connection = new acp.ClientSideConnection((_agent: acp.Agent) => clientImpl, stream);
 
-    session.ptyProcess = ptyProcess;
+    session.execSession = execSession;
+    session.abortController = abortController;
     session.connection = connection;
     session.connectionClosed = false;
 
-    ptyProcess.onExit(({ exitCode }) => {
-      debugPty(`${session.info.sandboxName} process exited with code ${exitCode}`);
-      const s = this.sessions.get(sessionId);
-      if (s) {
-        s.connectionClosed = true;
-        if (s.info.status !== 'completed' && s.info.status !== 'cancelled') {
-          this.updateSessionStatus(sessionId, exitCode === 0 ? 'completed' : 'error');
-          if (exitCode !== 0) {
-            const stderrMsg = s.stderrLines.join(' ').trim();
-            s.info.error = stderrMsg || `Process exited with code ${exitCode}`;
+    execSession.done
+      .then(exitCode => {
+        debugPty(`${session.info.sandboxName} process exited with code ${exitCode}`);
+        const s = this.sessions.get(sessionId);
+        if (s) {
+          s.connectionClosed = true;
+          if (s.info.status !== 'completed' && s.info.status !== 'cancelled') {
+            this.updateSessionStatus(sessionId, exitCode === 0 ? 'completed' : 'error');
+            if (exitCode !== 0) {
+              const stderrMsg = s.stderrLines.join(' ').trim();
+              s.info.error = stderrMsg || `Process exited with code ${exitCode}`;
+            }
           }
         }
-      }
-    });
+      })
+      .catch((err: unknown) => {
+        debugPty(`${session.info.sandboxName} exec error: ${err instanceof Error ? err.message : String(err)}`);
+        const s = this.sessions.get(sessionId);
+        if (s) {
+          s.connectionClosed = true;
+          if (s.info.status !== 'completed' && s.info.status !== 'cancelled') {
+            this.updateSessionStatus(sessionId, 'error');
+            const stderrMsg = s.stderrLines.join(' ').trim();
+            s.info.error = stderrMsg || (err instanceof Error ? err.message : String(err));
+          }
+        }
+      });
 
     const initResult = await connection.initialize({
       protocolVersion: acp.PROTOCOL_VERSION,
@@ -1142,7 +1146,7 @@ export class AcpSessionManager {
       session.connection.cancel({ sessionId: session.acpSessionId }).catch(() => {});
     }
 
-    this.killPtyProcess(session);
+    this.closeExecSession(session);
     this.updateSessionStatus(sessionId, 'cancelled');
   }
 
@@ -1165,30 +1169,20 @@ export class AcpSessionManager {
       }
     }
 
-    this.killPtyProcess(session);
+    this.closeExecSession(session);
 
     this.sessions.delete(sessionId);
     await this.removeFromDisk(sessionId);
     this.apiSender.send('acp-session-update');
   }
 
-  private killPtyProcess(session: AcpSession): void {
-    if (!session.ptyProcess) {
-      return;
-    }
+  private closeExecSession(session: AcpSession): void {
     try {
-      session.ptyProcess.write('\x03');
-      session.ptyProcess.write('\x04');
+      session.execSession.close();
     } catch {
-      // stream may be closed
+      // already closed
     }
-    setTimeout(() => {
-      try {
-        session.ptyProcess.kill('SIGKILL');
-      } catch {
-        // already dead
-      }
-    }, 1000);
+    session.abortController.abort();
   }
 
   private updateSessionStatus(sessionId: string, status: AcpSessionStatus): void {
@@ -1235,7 +1229,7 @@ export class AcpSessionManager {
       for (const [, pending] of session.pendingRequests) {
         pending.reject(new Error('Manager disposing'));
       }
-      this.killPtyProcess(session);
+      this.closeExecSession(session);
     }
     this.sessions.clear();
   }
@@ -1283,7 +1277,8 @@ export class AcpSessionManager {
         );
         const session: AcpSession = {
           info,
-          ptyProcess: undefined!,
+          execSession: undefined!,
+          abortController: new AbortController(),
           connection: undefined!,
           acpSessionId: data.acpSessionId,
           events,

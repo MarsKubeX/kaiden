@@ -25,6 +25,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import type { AgentRegistry } from '/@/plugin/agent-registry.js';
 import type { Directories } from '/@/plugin/directories.js';
 import type { OpenshellCli } from '/@/plugin/openshell-cli/openshell-cli.js';
+import type { OpenshellSdkClientManager } from '/@/plugin/openshell-cli/openshell-sdk-client-manager.js';
 import type { AcpSessionCreateOptions, AcpSessionInfo } from '/@api/acp-session-info.js';
 import type { AgentInfo } from '/@api/agent-info.js';
 import type { ApiSenderType } from '/@api/api-sender/api-sender-type.js';
@@ -34,7 +35,6 @@ import { AcpSessionManager } from './acp-session-manager.js';
 
 vi.mock(import('node:fs'));
 vi.mock(import('node:fs/promises'));
-vi.mock(import('node-pty'));
 vi.mock(import('@agentclientprotocol/sdk'));
 
 const apiSender: ApiSenderType = {
@@ -47,6 +47,13 @@ const openshellCli: OpenshellCli = {
   listSandboxes: vi.fn(),
   uploadToSandbox: vi.fn(),
 } as unknown as OpenshellCli;
+
+const sdkSandbox = {
+  execInteractive: vi.fn(),
+};
+const openshellSdkClientManager = {
+  getClient: vi.fn().mockResolvedValue({ sandbox: sdkSandbox }),
+} as unknown as OpenshellSdkClientManager;
 
 const agentRegistry: AgentRegistry = {
   getAgent: vi.fn(),
@@ -98,7 +105,8 @@ describe('AcpSessionManager', () => {
     vi.resetAllMocks();
     vi.mocked(directories.getAcpSessionsDirectory).mockReturnValue(FAKE_SESSIONS_DIR);
     vi.mocked(openshellCli.listSandboxes).mockResolvedValue([]);
-    manager = new AcpSessionManager(apiSender, openshellCli, agentRegistry, directories);
+    vi.mocked(openshellSdkClientManager.getClient).mockResolvedValue({ sandbox: sdkSandbox } as never);
+    manager = new AcpSessionManager(apiSender, openshellCli, agentRegistry, directories, openshellSdkClientManager);
   });
 
   describe('resolveAgentCommand', () => {
@@ -1215,14 +1223,17 @@ describe('AcpSessionManager', () => {
     });
   });
 
-  async function setupPtySession(): Promise<{
+  interface MockExecSession {
+    pushStderr: (data: string) => void;
+    end: (exitCode: number) => void;
+  }
+
+  async function setupSdkSession(): Promise<{
     sessionId: string;
-    emitStderr: (data: string) => void;
-    emitExit: (e: { exitCode: number; signal?: number }) => void;
+    mockExec: MockExecSession;
   }> {
     const { existsSync } = await import('node:fs');
     const { writeFile } = await import('node:fs/promises');
-    const { spawn } = await import('node-pty');
 
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(writeFile).mockResolvedValue();
@@ -1231,20 +1242,42 @@ describe('AcpSessionManager', () => {
     vi.mocked(agentRegistry.getAgent).mockResolvedValue(agent);
     vi.mocked(openshellCli.listSandboxes).mockResolvedValue([createSandbox()]);
 
-    let onDataCallback: (data: string) => void = () => {};
-    let onExitCallback: (e: { exitCode: number; signal?: number }) => void = () => {};
+    type ExecStreamEvent = { stream: 'stdout' | 'stderr'; data: Buffer } | { type: 'exit'; exitCode: number };
+    const events: ExecStreamEvent[] = [];
+    let eventResolve: ((result: IteratorResult<ExecStreamEvent>) => void) | undefined;
+    let iterDone = false;
+    let doneResolve!: (code: number) => void;
+    const donePromise = new Promise<number>(r => {
+      doneResolve = r;
+    });
 
-    const mockPty = {
-      onData: vi.fn((cb: (data: string) => void) => {
-        onDataCallback = cb;
-      }),
-      onExit: vi.fn((cb: (e: { exitCode: number; signal?: number }) => void) => {
-        onExitCallback = cb;
-      }),
-      write: vi.fn(),
-      kill: vi.fn(),
+    const output: AsyncIterable<ExecStreamEvent> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next(): Promise<IteratorResult<ExecStreamEvent>> {
+            if (events.length > 0) {
+              return Promise.resolve({ value: events.shift()!, done: false });
+            }
+            if (iterDone) {
+              return Promise.resolve({ value: undefined as never, done: true });
+            }
+            return new Promise(r => {
+              eventResolve = r;
+            });
+          },
+        };
+      },
     };
-    vi.mocked(spawn).mockReturnValue(mockPty as never);
+
+    const mockSession = {
+      output,
+      write: vi.fn(),
+      resize: vi.fn(),
+      close: vi.fn(),
+      done: donePromise,
+    };
+
+    sdkSandbox.execInteractive.mockResolvedValue(mockSession);
 
     const mockConnection = {
       initialize: vi.fn().mockResolvedValue({ protocolVersion: '0.1' }),
@@ -1268,62 +1301,79 @@ describe('AcpSessionManager', () => {
       expect(mockConnection.prompt).toHaveBeenCalled();
     });
 
+    function pushEvent(event: ExecStreamEvent): void {
+      if (eventResolve) {
+        const r = eventResolve;
+        eventResolve = undefined;
+        r({ value: event, done: false });
+      } else {
+        events.push(event);
+      }
+    }
+
     return {
       sessionId: session.id,
-      emitStderr: onDataCallback,
-      emitExit: onExitCallback,
+      mockExec: {
+        pushStderr: (data: string): void => {
+          pushEvent({ stream: 'stderr', data: Buffer.from(data) });
+        },
+        end: (exitCode: number): void => {
+          iterDone = true;
+          if (eventResolve) {
+            const r = eventResolve;
+            eventResolve = undefined;
+            r({ value: undefined as never, done: true });
+          }
+          // Defer done resolution to let the output loop drain queued events first
+          queueMicrotask(() => queueMicrotask(() => doneResolve(exitCode)));
+        },
+      },
     };
   }
 
   describe('ANSI code stripping in error messages', () => {
     test('strips ANSI escape codes from stderr lines on process exit', async () => {
-      const { emitStderr, emitExit, sessionId } = await setupPtySession();
+      const { mockExec, sessionId } = await setupSdkSession();
 
-      // Simulate PTY emitting stderr with ANSI codes
-      emitStderr('\x1b[31m×\x1b[0m code: service unavailable\n');
-      emitStderr('\x1b[1m\x1b[33mwarning:\x1b[0m connection lost\n');
+      mockExec.pushStderr('\x1b[31m×\x1b[0m code: service unavailable');
+      mockExec.pushStderr('\x1b[1m\x1b[33mwarning:\x1b[0m connection lost');
+      mockExec.end(1);
 
-      // Simulate process exit with non-zero code
-      emitExit({ exitCode: 1 });
-
-      const sessions = await manager.listSessions();
-      const updatedSession = sessions.find(s => s.id === sessionId);
-
-      expect(updatedSession?.error).toBeDefined();
-      // Verify ANSI codes are stripped
-      expect(updatedSession!.error).not.toContain('\x1b[');
-      expect(updatedSession!.error).not.toContain('\x1b[0m');
-      expect(updatedSession!.error).toContain('code: service unavailable');
-      expect(updatedSession!.error).toContain('warning:');
-      expect(updatedSession!.error).toContain('connection lost');
+      await vi.waitFor(async () => {
+        const sessions = await manager.listSessions();
+        const updatedSession = sessions.find(s => s.id === sessionId);
+        expect(updatedSession?.error).toBeDefined();
+        expect(updatedSession!.error).not.toContain('\x1b[');
+        expect(updatedSession!.error).toContain('code: service unavailable');
+        expect(updatedSession!.error).toContain('warning:');
+        expect(updatedSession!.error).toContain('connection lost');
+      });
     });
 
     test('handles stderr lines without ANSI codes unchanged', async () => {
-      const { emitStderr, emitExit, sessionId } = await setupPtySession();
+      const { mockExec, sessionId } = await setupSdkSession();
 
-      // Simulate PTY emitting stderr without ANSI codes
-      emitStderr('plain error message\n');
+      mockExec.pushStderr('plain error message');
+      mockExec.end(1);
 
-      emitExit({ exitCode: 1 });
-
-      const sessions = await manager.listSessions();
-      const updatedSession = sessions.find(s => s.id === sessionId);
-
-      expect(updatedSession?.error).toBe('plain error message');
+      await vi.waitFor(async () => {
+        const sessions = await manager.listSessions();
+        const updatedSession = sessions.find(s => s.id === sessionId);
+        expect(updatedSession?.error).toBe('plain error message');
+      });
     });
 
     test('handles empty stderr lines after stripping ANSI codes', async () => {
-      const { emitStderr, emitExit, sessionId } = await setupPtySession();
+      const { mockExec, sessionId } = await setupSdkSession();
 
-      // Simulate PTY emitting stderr with actual content alongside ANSI
-      emitStderr('\x1b[31m×\x1b[0m supervisor relay failed\n');
+      mockExec.pushStderr('\x1b[31m×\x1b[0m supervisor relay failed');
+      mockExec.end(1);
 
-      emitExit({ exitCode: 1 });
-
-      const sessions = await manager.listSessions();
-      const updatedSession = sessions.find(s => s.id === sessionId);
-
-      expect(updatedSession?.error).toBe('× supervisor relay failed');
+      await vi.waitFor(async () => {
+        const sessions = await manager.listSessions();
+        const updatedSession = sessions.find(s => s.id === sessionId);
+        expect(updatedSession?.error).toBe('× supervisor relay failed');
+      });
     });
   });
 });

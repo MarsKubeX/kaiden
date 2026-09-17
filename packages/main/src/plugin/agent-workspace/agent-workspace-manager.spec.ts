@@ -21,6 +21,7 @@ import { access, lstat, readFile, realpath, rm, writeFile } from 'node:fs/promis
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import type { ExecInteractiveSession } from '@nvidia/openshell-sdk';
 import type {
   Agent,
   AgentWorkspaceConfiguration,
@@ -29,8 +30,6 @@ import type {
   ProviderConnectionStatus,
 } from '@openkaiden/api';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
-import type { IPty } from 'node-pty';
-import { spawn } from 'node-pty';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import type { AgentRegistry } from '/@/plugin/agent-registry.js';
@@ -63,8 +62,6 @@ vi.mock(import('node:fs/promises'));
 vi.mock(import('node:os'));
 vi.mock(import('js-yaml'));
 vi.mock(import('yaml'));
-vi.mock(import('node-pty'));
-
 vi.mock(import('/@/plugin/openshell-cli/openshell-cli.js'));
 vi.mock(import('/@/plugin/openshell-cli/openshell-policy-manager.js'));
 
@@ -100,6 +97,7 @@ const sdkSandbox = {
   delete: vi.fn(),
   waitDeleted: vi.fn(),
   waitReady: vi.fn(),
+  execInteractive: vi.fn(),
 };
 const openshellSdkClientManager = {
   getClient: vi.fn().mockResolvedValue({ sandbox: sdkSandbox }),
@@ -1761,113 +1759,170 @@ describe('updateConfiguration', () => {
   });
 });
 
+interface MockExecSession {
+  session: ExecInteractiveSession;
+  pushEvent(event: { stream: 'stdout' | 'stderr'; data: Buffer }): void;
+  end(exitCode?: number): void;
+}
+
+function createMockExecSession(): MockExecSession {
+  type StreamEvent = { stream: 'stdout' | 'stderr'; data: Buffer } | { type: 'exit'; exitCode: number };
+  const events: StreamEvent[] = [];
+  let resolveNext: ((result: IteratorResult<StreamEvent>) => void) | undefined;
+  let ended = false;
+  let doneResolve!: (code: number) => void;
+  const donePromise = new Promise<number>(r => {
+    doneResolve = r;
+  });
+
+  const output: AsyncIterable<StreamEvent> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next(): Promise<IteratorResult<StreamEvent>> {
+          if (events.length > 0) {
+            return Promise.resolve({ value: events.shift()!, done: false });
+          }
+          if (ended) {
+            return Promise.resolve({ value: undefined as unknown as StreamEvent, done: true });
+          }
+          return new Promise(r => {
+            resolveNext = r;
+          });
+        },
+      };
+    },
+  };
+
+  const session = {
+    output,
+    write: vi.fn(),
+    resize: vi.fn(),
+    close: vi.fn(),
+    done: donePromise,
+  } as unknown as ExecInteractiveSession;
+
+  return {
+    session,
+    pushEvent(event: { stream: 'stdout' | 'stderr'; data: Buffer }): void {
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = undefined;
+        r({ value: event, done: false });
+      } else {
+        events.push(event);
+      }
+    },
+    end(exitCode = 0): void {
+      ended = true;
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = undefined;
+        r({ value: undefined as unknown as StreamEvent, done: true });
+      }
+      doneResolve(exitCode);
+    },
+  };
+}
+
 describe('shellInAgentWorkspace', () => {
-  let onDataCallback: ((data: string) => void) | undefined;
-  let onExitCallback: (() => void) | undefined;
+  test('returns write, resize, and execSession', async () => {
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
-  function createMockPty(): IPty {
-    onDataCallback = undefined;
-    onExitCallback = undefined;
-    return {
-      onData: vi.fn((cb: (data: string) => void) => {
-        onDataCallback = cb;
-        return { dispose: vi.fn() };
-      }),
-      onExit: vi.fn((cb: () => void) => {
-        onExitCallback = cb;
-        return { dispose: vi.fn() };
-      }),
-      write: vi.fn(),
-      resize: vi.fn(),
-      kill: vi.fn(),
-      pid: 123,
-      cols: 80,
-      rows: 24,
-      process: 'kdn',
-      handleFlowControl: false,
-      pause: vi.fn(),
-      resume: vi.fn(),
-      clear: vi.fn(),
-    } as unknown as IPty;
-  }
-
-  test('returns write, resize, and ptyProcess', () => {
-    vi.mocked(spawn).mockReturnValue(createMockPty());
-
-    const result = manager.shellInAgentWorkspace('test-workspace-1', vi.fn(), vi.fn(), vi.fn());
+    const result = await manager.shellInAgentWorkspace('test-workspace-1', 'kaiden', vi.fn(), vi.fn(), vi.fn());
 
     expect(result).toHaveProperty('write');
     expect(result).toHaveProperty('resize');
-    expect(result).toHaveProperty('ptyProcess');
+    expect(result).toHaveProperty('execSession');
+    expect(result).toHaveProperty('abortController');
   });
 
-  test('spawns kdn terminal with workspace name', () => {
-    vi.mocked(spawn).mockReturnValue(createMockPty());
-    vi.mocked(openshellCli.getCliPath).mockReturnValue('openshell');
+  test('calls execInteractive with workspace name', async () => {
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
-    manager.shellInAgentWorkspace('test-workspace-1', vi.fn(), vi.fn(), vi.fn());
+    await manager.shellInAgentWorkspace('test-workspace-1', 'kaiden', vi.fn(), vi.fn(), vi.fn());
 
-    expect(spawn).toHaveBeenCalledWith('openshell', ['sandbox', 'connect', 'test-workspace-1'], expect.any(Object));
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledWith(
+      'test-workspace-1',
+      ['/bin/sh'],
+      expect.objectContaining({ tty: true }),
+    );
   });
 
-  test('write function forwards data to pty', () => {
-    const mockPty = createMockPty();
-    vi.mocked(spawn).mockReturnValue(mockPty);
+  test('write function forwards data to exec session', async () => {
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
-    const result = manager.shellInAgentWorkspace('test-workspace-1', vi.fn(), vi.fn(), vi.fn());
+    const result = await manager.shellInAgentWorkspace('test-workspace-1', 'kaiden', vi.fn(), vi.fn(), vi.fn());
     result.write('hello');
 
-    expect(mockPty.write).toHaveBeenCalledWith('hello');
+    expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('hello'));
   });
 
-  test('resize function forwards dimensions to pty', () => {
-    const mockPty = createMockPty();
-    vi.mocked(spawn).mockReturnValue(mockPty);
+  test('resize function forwards dimensions to exec session', async () => {
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
-    const result = manager.shellInAgentWorkspace('test-workspace-1', vi.fn(), vi.fn(), vi.fn());
+    const result = await manager.shellInAgentWorkspace('test-workspace-1', 'kaiden', vi.fn(), vi.fn(), vi.fn());
     result.resize(120, 40);
 
-    expect(mockPty.resize).toHaveBeenCalledWith(120, 40);
+    expect(mock.session.resize).toHaveBeenCalledWith(120, 40);
   });
 
-  test('calls onData when pty emits data', () => {
-    vi.mocked(spawn).mockReturnValue(createMockPty());
+  test('calls onData when exec session emits stdout', async () => {
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     const onData = vi.fn();
-    manager.shellInAgentWorkspace('test-workspace-1', onData, vi.fn(), vi.fn());
+    await manager.shellInAgentWorkspace('test-workspace-1', 'kaiden', onData, vi.fn(), vi.fn());
 
-    expect(onDataCallback).toBeDefined();
-    onDataCallback!('output');
-
-    expect(onData).toHaveBeenCalledWith('output');
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('output') });
+    await vi.waitFor(() => expect(onData).toHaveBeenCalledWith('output'));
   });
 
-  test('calls onEnd when pty exits', () => {
-    vi.mocked(spawn).mockReturnValue(createMockPty());
+  test('calls onEnd when exec session output ends', async () => {
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     const onEnd = vi.fn();
-    manager.shellInAgentWorkspace('test-workspace-1', vi.fn(), vi.fn(), onEnd);
+    await manager.shellInAgentWorkspace('test-workspace-1', 'kaiden', vi.fn(), vi.fn(), onEnd);
 
-    expect(onExitCallback).toBeDefined();
-    onExitCallback!();
-
-    expect(onEnd).toHaveBeenCalled();
+    mock.end();
+    await vi.waitFor(() => expect(onEnd).toHaveBeenCalled());
   });
 });
 
 describe('dispose', () => {
-  test('kills active terminal processes', async () => {
-    vi.mocked(openshellCli.listSandboxesPerGateway).mockResolvedValue(TEST_SUMMARIES);
-
-    const mockPty = {
-      onData: vi.fn(() => ({ dispose: vi.fn() })),
-      onExit: vi.fn(() => ({ dispose: vi.fn() })),
+  function createMockExecSessionForIpc(): ExecInteractiveSession {
+    let resolveNext: ((result: IteratorResult<unknown>) => void) | undefined;
+    const output: AsyncIterable<unknown> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next(): Promise<IteratorResult<unknown>> {
+            return new Promise(r => {
+              resolveNext = r;
+            });
+          },
+        };
+      },
+    };
+    return {
+      output,
       write: vi.fn(),
       resize: vi.fn(),
-      kill: vi.fn(),
-      pid: 123,
-    } as unknown as IPty;
-    vi.mocked(spawn).mockReturnValue(mockPty);
+      close: vi.fn(() => {
+        resolveNext?.({ value: undefined, done: true });
+      }),
+      done: new Promise<number>(() => {}),
+    } as unknown as ExecInteractiveSession;
+  }
+
+  test('closes active terminal sessions', async () => {
+    vi.mocked(openshellCli.listSandboxesPerGateway).mockResolvedValue(TEST_SUMMARIES);
+
+    const mockSession = createMockExecSessionForIpc();
+    sdkSandbox.execInteractive.mockResolvedValue(mockSession);
 
     const terminalHandler = vi
       .mocked(ipcHandle)
@@ -1882,7 +1937,7 @@ describe('dispose', () => {
 
     manager.dispose();
 
-    expect(mockPty.kill).toHaveBeenCalled();
+    expect(mockSession.close).toHaveBeenCalled();
   });
 
   test('terminal IPC handler rejects when workspace id is not found', async () => {
@@ -1905,23 +1960,35 @@ describe('dispose', () => {
   test('does not send terminal data when webContents is destroyed', async () => {
     vi.mocked(openshellCli.listSandboxesPerGateway).mockResolvedValue(TEST_SUMMARIES);
 
-    let onDataCallback: ((data: string) => void) | undefined;
-    let onExitCallback: (() => void) | undefined;
-    const mockPty = {
-      onData: vi.fn((cb: (data: string) => void) => {
-        onDataCallback = cb;
-        return { dispose: vi.fn() };
-      }),
-      onExit: vi.fn((cb: () => void) => {
-        onExitCallback = cb;
-        return { dispose: vi.fn() };
-      }),
+    type StreamEvent = { stream: 'stdout' | 'stderr'; data: Buffer };
+    const events: StreamEvent[] = [];
+    let resolveNext: ((result: IteratorResult<StreamEvent>) => void) | undefined;
+    let ended = false;
+    const output: AsyncIterable<StreamEvent> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next(): Promise<IteratorResult<StreamEvent>> {
+            if (events.length > 0) {
+              return Promise.resolve({ value: events.shift()!, done: false });
+            }
+            if (ended) {
+              return Promise.resolve({ value: undefined as unknown as StreamEvent, done: true });
+            }
+            return new Promise(r => {
+              resolveNext = r;
+            });
+          },
+        };
+      },
+    };
+    const mockSession = {
+      output,
       write: vi.fn(),
       resize: vi.fn(),
-      kill: vi.fn(),
-      pid: 123,
-    } as unknown as IPty;
-    vi.mocked(spawn).mockReturnValue(mockPty);
+      close: vi.fn(),
+      done: new Promise<number>(() => {}),
+    } as unknown as ExecInteractiveSession;
+    sdkSandbox.execInteractive.mockResolvedValue(mockSession);
 
     const terminalHandler = vi
       .mocked(ipcHandle)
@@ -1935,33 +2002,36 @@ describe('dispose', () => {
 
     vi.mocked(webContents.isDestroyed).mockReturnValue(true);
 
-    onDataCallback!('some output');
-    onExitCallback!();
+    const pushEvent = (event: StreamEvent): void => {
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = undefined;
+        r({ value: event, done: false });
+      } else {
+        events.push(event);
+      }
+    };
+    const endStream = (): void => {
+      ended = true;
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = undefined;
+        r({ value: undefined as unknown as StreamEvent, done: true });
+      }
+    };
+
+    pushEvent({ stream: 'stdout', data: Buffer.from('some output') });
+    await new Promise(r => setTimeout(r, 0));
+    endStream();
+    await new Promise(r => setTimeout(r, 0));
 
     expect(webContents.send).not.toHaveBeenCalled();
   });
 });
 
 describe('terminal IPC session lifecycle', () => {
-  function createTerminalMockPty(): { pty: IPty; triggerData: (data: string) => void } {
-    let onDataCb: ((data: string) => void) | undefined;
-    const pty = {
-      onData: vi.fn((cb: (data: string) => void) => {
-        onDataCb = cb;
-        return { dispose: vi.fn() };
-      }),
-      onExit: vi.fn(() => ({ dispose: vi.fn() })),
-      write: vi.fn(),
-      resize: vi.fn(),
-      kill: vi.fn(),
-      pid: 789,
-    } as unknown as IPty;
-    return {
-      pty,
-      triggerData: (data: string): void => {
-        onDataCb?.(data);
-      },
-    };
+  function createTerminalMockExecSession(): MockExecSession {
+    return createMockExecSession();
   }
 
   function getIpcHandler<T>(channel: string): T {
@@ -1970,30 +2040,32 @@ describe('terminal IPC session lifecycle', () => {
 
   test('closes an active workspace terminal before opening a fresh one', async () => {
     vi.mocked(openshellCli.listSandboxesPerGateway).mockResolvedValue(TEST_SUMMARIES);
-    const { pty: firstPty, triggerData: triggerFirstData } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(firstPty);
+    const first = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(first.session);
 
     const terminalHandler =
       getIpcHandler<(_listener: unknown, id: string, onDataId: number) => Promise<number>>('agent-workspace:terminal');
 
     await terminalHandler({}, 'ws-1', 10);
 
-    const { pty: secondPty, triggerData: triggerSecondData } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(secondPty);
+    const second = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(second.session);
     await terminalHandler({}, 'ws-1', 11);
-    triggerFirstData('stale output');
-    triggerSecondData('output');
+    first.pushEvent({ stream: 'stdout', data: Buffer.from('stale output') });
+    second.pushEvent({ stream: 'stdout', data: Buffer.from('output') });
 
-    expect(firstPty.kill).toHaveBeenCalled();
-    expect(spawn).toHaveBeenCalledTimes(2);
-    expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', 11, 'stale output');
-    expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 11, 'output');
+    expect(first.session.close).toHaveBeenCalled();
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', 11, 'stale output');
+      expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 11, 'output');
+    });
   });
 
   test('routes send and resize through the workspace terminal session and removes it on close', async () => {
     vi.mocked(openshellCli.listSandboxesPerGateway).mockResolvedValue(TEST_SUMMARIES);
-    const { pty } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty);
+    const mock = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     const terminalHandler =
       getIpcHandler<(_listener: unknown, id: string, onDataId: number) => Promise<number>>('agent-workspace:terminal');
@@ -2013,14 +2085,14 @@ describe('terminal IPC session lifecycle', () => {
     await resizeHandler({}, 10, 120, 40);
     await closeHandler({}, 10);
 
-    const nextPty = createTerminalMockPty().pty;
-    vi.mocked(spawn).mockReturnValue(nextPty);
+    const nextMock = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(nextMock.session);
     await terminalHandler({}, 'ws-1', 11);
 
-    expect(pty.write).toHaveBeenCalledWith('hello');
-    expect(pty.resize).toHaveBeenCalledWith(120, 40);
-    expect(pty.kill).toHaveBeenCalled();
-    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('hello'));
+    expect(mock.session.resize).toHaveBeenCalledWith(120, 40);
+    expect(mock.session.close).toHaveBeenCalled();
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -2044,25 +2116,8 @@ describe('terminal agent command execution', () => {
     },
   ];
 
-  function createTerminalMockPty(): { pty: IPty; triggerData: (data: string) => void } {
-    let onDataCb: ((data: string) => void) | undefined;
-    const pty = {
-      onData: vi.fn((cb: (data: string) => void) => {
-        onDataCb = cb;
-        return { dispose: vi.fn() };
-      }),
-      onExit: vi.fn(() => ({ dispose: vi.fn() })),
-      write: vi.fn(),
-      resize: vi.fn(),
-      kill: vi.fn(),
-      pid: 456,
-    } as unknown as IPty;
-    return {
-      pty,
-      triggerData: (data: string): void => {
-        onDataCb?.(data);
-      },
-    };
+  function createTerminalMockExecSession(): MockExecSession {
+    return createMockExecSession();
   }
 
   function getTerminalHandler(): (_listener: unknown, id: string, onDataId: number) => Promise<number> {
@@ -2082,13 +2137,13 @@ describe('terminal agent command execution', () => {
       command: '/usr/bin/agent start',
       destinationSkillsFolder: '~/.agent',
     });
-    const { pty, triggerData } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty);
+    const mock = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
-    triggerData('$ ');
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
 
-    expect(pty.write).toHaveBeenCalledWith('/usr/bin/agent start\n');
+    await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n')));
   });
 
   test('does not execute agent command on subsequent connections', async () => {
@@ -2100,19 +2155,21 @@ describe('terminal agent command execution', () => {
       command: '/usr/bin/agent start',
       destinationSkillsFolder: '~/.agent',
     });
-    const { pty: pty1, triggerData: triggerData1 } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty1);
+    const mock1 = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock1.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
-    triggerData1('$ ');
+    mock1.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    await vi.waitFor(() => expect(mock1.session.write).toHaveBeenCalled());
 
-    const { pty: pty2, triggerData: triggerData2 } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty2);
+    const mock2 = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock2.session);
 
     await getTerminalHandler()({}, 'ws-agent', 11);
-    triggerData2('$ ');
+    mock2.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    await new Promise(r => setTimeout(r, 0));
 
-    expect(pty2.write).not.toHaveBeenCalled();
+    expect(mock2.session.write).not.toHaveBeenCalled();
   });
 
   test('retries agent command when replaced before first terminal data', async () => {
@@ -2124,31 +2181,34 @@ describe('terminal agent command execution', () => {
       command: '/usr/bin/agent start',
       destinationSkillsFolder: '~/.agent',
     });
-    const { pty: pty1, triggerData: triggerData1 } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty1);
+    const mock1 = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock1.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
 
-    const { pty: pty2, triggerData: triggerData2 } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty2);
+    const mock2 = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock2.session);
     await getTerminalHandler()({}, 'ws-agent', 11);
 
-    triggerData1('$ ');
-    triggerData2('$ ');
+    mock1.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    mock2.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
 
-    expect(pty1.write).not.toHaveBeenCalledWith('/usr/bin/agent start\n');
-    expect(pty2.write).toHaveBeenCalledWith('/usr/bin/agent start\n');
+    await vi.waitFor(() => {
+      expect(mock1.session.write).not.toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n'));
+      expect(mock2.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n'));
+    });
   });
 
   test('does not execute command when workspace has no agent label', async () => {
     vi.mocked(openshellCli.listSandboxesPerGateway).mockResolvedValue(SANDBOXES_WITH_AGENT);
-    const { pty, triggerData } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty);
+    const mock = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-no-label', 10);
-    triggerData('$ ');
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    await new Promise(r => setTimeout(r, 0));
 
-    expect(pty.write).not.toHaveBeenCalled();
+    expect(mock.session.write).not.toHaveBeenCalled();
     expect(agentRegistry.getAgent).not.toHaveBeenCalled();
   });
 
@@ -2161,13 +2221,14 @@ describe('terminal agent command execution', () => {
       command: '',
       destinationSkillsFolder: '~/.agent',
     });
-    const { pty, triggerData } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty);
+    const mock = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
-    triggerData('$ ');
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    await new Promise(r => setTimeout(r, 0));
 
-    expect(pty.write).not.toHaveBeenCalled();
+    expect(mock.session.write).not.toHaveBeenCalled();
   });
 
   test('executes agent command only once despite multiple data events', async () => {
@@ -2179,16 +2240,19 @@ describe('terminal agent command execution', () => {
       command: '/usr/bin/agent start',
       destinationSkillsFolder: '~/.agent',
     });
-    const { pty, triggerData } = createTerminalMockPty();
-    vi.mocked(spawn).mockReturnValue(pty);
+    const mock = createTerminalMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
-    triggerData('$ ');
-    triggerData('more output');
-    triggerData('even more output');
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalled());
 
-    expect(pty.write).toHaveBeenCalledTimes(1);
-    expect(pty.write).toHaveBeenCalledWith('/usr/bin/agent start\n');
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('more output') });
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('even more output') });
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(mock.session.write).toHaveBeenCalledTimes(1);
+    expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n'));
   });
 });
 

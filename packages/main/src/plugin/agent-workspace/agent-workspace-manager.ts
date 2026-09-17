@@ -20,11 +20,10 @@ import { access, lstat, readFile, realpath, rm, writeFile } from 'node:fs/promis
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, posix, resolve } from 'node:path';
 
+import type { ExecInteractiveSession } from '@nvidia/openshell-sdk';
 import type { Disposable } from '@openkaiden/api';
 import type { WebContents } from 'electron';
 import { inject, injectable, preDestroy } from 'inversify';
-import type { IPty } from 'node-pty';
-import { spawn } from 'node-pty';
 
 import { AgentRegistry } from '/@/plugin/agent-registry.js';
 import { updateWorkspaceConfig, writeWorkspaceConfig } from '/@/plugin/agent-workspace/workspace-config-writer.js';
@@ -58,6 +57,7 @@ import type {
   GatewaySandboxes,
   OpenshellBindMount,
   OpenshellUpload,
+  SandboxInfo,
 } from '/@api/openshell-gateway-info.js';
 import { AGENT_LABEL, decodeWorkspaceLabels, WORKSPACE_LABEL } from '/@api/openshell-gateway-info.js';
 
@@ -73,7 +73,8 @@ const SANDBOX_DELETE_TIMEOUT_SECONDS = 120;
 
 interface WorkspaceTerminalSession {
   callbackId: number;
-  pty: IPty;
+  execSession: ExecInteractiveSession;
+  abortController: AbortController;
   write: (param: string) => void;
   resize: (w: number, h: number) => void;
   commandExecuted: boolean;
@@ -649,37 +650,52 @@ export class AgentWorkspaceManager implements Disposable {
     await this.deleteWorkspace(name, gateway);
   }
 
-  shellInAgentWorkspace(
+  async shellInAgentWorkspace(
     name: string,
+    gateway: string,
     onData: (data: string) => void,
-    _onError: (error: string) => void,
+    onError: (error: string) => void,
     onEnd: () => void,
-  ): {
+  ): Promise<{
     write: (param: string) => void;
     resize: (w: number, h: number) => void;
-    ptyProcess: IPty;
-  } {
-    const ptyProcess = spawn(this.openshellCli.getCliPath(), ['sandbox', 'connect', name], {
-      name: 'xterm-256color',
-      env: process.env as Record<string, string>,
+    execSession: ExecInteractiveSession;
+    abortController: AbortController;
+  }> {
+    const abortController = new AbortController();
+    const sdkClient = await this.openshellSdkClientManager.getClient(gateway);
+    const execSession = await sdkClient.sandbox.execInteractive(name, ['/bin/sh'], {
+      tty: true,
+      signal: abortController.signal,
     });
 
-    ptyProcess.onData((data: string) => {
-      onData(data);
-    });
-
-    ptyProcess.onExit(() => {
+    (async (): Promise<void> => {
+      for await (const event of execSession.output) {
+        if ('type' in event) {
+          break;
+        }
+        const text = event.data.toString();
+        if (event.stream === 'stdout') {
+          onData(text);
+        } else {
+          onError(text);
+        }
+      }
+      onEnd();
+    })().catch((err: unknown) => {
+      console.error(`[AgentWorkspace] terminal stream error for "${name}":`, err);
       onEnd();
     });
 
     return {
       write: (param: string): void => {
-        ptyProcess.write(param);
+        execSession.write(Buffer.from(param));
       },
       resize: (cols: number, rows: number): void => {
-        ptyProcess.resize(cols, rows);
+        execSession.resize(cols, rows);
       },
-      ptyProcess,
+      execSession,
+      abortController,
     };
   }
 
@@ -693,10 +709,11 @@ export class AgentWorkspaceManager implements Disposable {
       return;
     }
     try {
-      session.pty.kill();
+      session.execSession.close();
     } catch {
-      /* already exited */
+      /* already closed */
     }
+    session.abortController.abort();
     this.workspaceTerminals.delete(workspaceId);
   }
 
@@ -799,8 +816,17 @@ export class AgentWorkspaceManager implements Disposable {
       'agent-workspace:terminal',
       async (_listener: unknown, id: string, onDataId: number): Promise<number> => {
         const workspaces = await this.listOpenshellSandboxes();
-        const workspace = workspaces.flatMap(gw => gw.sandboxes).find(ws => ws.id === id);
-        if (!workspace) {
+        let workspace: SandboxInfo | undefined;
+        let gatewayName: string | undefined;
+        for (const gw of workspaces) {
+          const found = gw.sandboxes.find(ws => ws.id === id);
+          if (found) {
+            workspace = found;
+            gatewayName = gw.gateway.name;
+            break;
+          }
+        }
+        if (!workspace || !gatewayName) {
           throw new Error(`workspace "${id}" not found. Use "workspace list" to see available workspaces.`);
         }
 
@@ -825,11 +851,12 @@ export class AgentWorkspaceManager implements Disposable {
         }
 
         let commandSent = false;
-        const invocation = this.shellInAgentWorkspace(
+        const invocation = await this.shellInAgentWorkspace(
           workspace.name,
+          gatewayName,
           (content: string) => {
             const session = this.workspaceTerminals.get(id);
-            if (session && session.pty !== invocation.ptyProcess) {
+            if (session && session.execSession !== invocation.execSession) {
               return;
             }
             if (!this.webContents.isDestroyed()) {
@@ -839,14 +866,14 @@ export class AgentWorkspaceManager implements Disposable {
               commandSent = true;
               invocation.write(`${agentCommand}\n`);
               const activeSession = this.workspaceTerminals.get(id);
-              if (activeSession?.pty === invocation.ptyProcess) {
+              if (activeSession?.execSession === invocation.execSession) {
                 activeSession.commandExecuted = true;
               }
             }
           },
           (error: string) => {
             const session = this.workspaceTerminals.get(id);
-            if (session && session.pty !== invocation.ptyProcess) {
+            if (session && session.execSession !== invocation.execSession) {
               return;
             }
             if (!this.webContents.isDestroyed()) {
@@ -855,20 +882,21 @@ export class AgentWorkspaceManager implements Disposable {
           },
           () => {
             const session = this.workspaceTerminals.get(id);
-            if (session && session.pty !== invocation.ptyProcess) {
+            if (session && session.execSession !== invocation.execSession) {
               return;
             }
             if (!this.webContents.isDestroyed()) {
               this.webContents.send('agent-workspace:terminal-onEnd', session?.callbackId ?? onDataId);
             }
-            if (session?.pty === invocation.ptyProcess) {
+            if (session?.execSession === invocation.execSession) {
               this.workspaceTerminals.delete(id);
             }
           },
         );
         this.workspaceTerminals.set(id, {
           callbackId: onDataId,
-          pty: invocation.ptyProcess,
+          execSession: invocation.execSession,
+          abortController: invocation.abortController,
           write: invocation.write,
           resize: invocation.resize,
           commandExecuted,
@@ -943,10 +971,11 @@ export class AgentWorkspaceManager implements Disposable {
   dispose(): void {
     for (const session of this.workspaceTerminals.values()) {
       try {
-        session.pty.kill();
+        session.execSession.close();
       } catch {
-        /* already exited */
+        /* already closed */
       }
+      session.abortController.abort();
     }
     this.workspaceTerminals.clear();
     this.disposables.forEach(disposable => disposable.dispose());
