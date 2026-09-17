@@ -232,14 +232,23 @@ describe('route persistence across reloads', () => {
     expect(sessionStorage.getItem(SETTINGS_PAGE_KEY)).toBeNull();
   });
 
-  test('navigating to Dashboard clears sessionStorage', async () => {
+  test('navigating to / redirects to default page without saving to sessionStorage', async () => {
     render(App);
     router.goto('/images');
     await tick();
     router.goto('/');
     await tick();
+    expect(get(router).url).toBe('/agent-workspaces');
     expect(sessionStorage.getItem(LAST_ROUTE_KEY)).toBeNull();
     expect(sessionStorage.getItem(SETTINGS_PAGE_KEY)).toBeNull();
+  });
+
+  test('stale /chat route in sessionStorage is cleared on startup', async () => {
+    sessionStorage.setItem(LAST_ROUTE_KEY, '/chat/old-id');
+    render(App);
+    await tick();
+    expect(get(router).url).toBe('/agent-workspaces');
+    expect(sessionStorage.getItem(LAST_ROUTE_KEY)).toBeNull();
   });
 
   test('navigating to a preferences page saves it without overwriting last regular page', async () => {

@@ -107,14 +107,19 @@ import SubmenuNavigation from './SubmenuNavigation.svelte';
 
 router.mode.memory();
 
+const DEFAULT_PAGE = '/agent-workspaces';
 const LAST_ROUTE_KEY = 'last-route';
 const SETTINGS_PAGE_KEY = 'settings-page';
 
 let savedRoute: string | undefined = sessionStorage.getItem(LAST_ROUTE_KEY) ?? undefined;
+if (savedRoute?.startsWith('/chat')) {
+  savedRoute = undefined;
+  sessionStorage.removeItem(LAST_ROUTE_KEY);
+}
 let savedSettingsPage: string | undefined = sessionStorage.getItem(SETTINGS_PAGE_KEY) ?? undefined;
 
 //remember from where we come to preference pages
-let nonSettingsPage = savedRoute ?? '/';
+let nonSettingsPage = savedRoute ?? DEFAULT_PAGE;
 
 // tinro fires router.subscribe synchronously with the current state on setup,
 // and WelcomePage always calls router.goto('/') in its onMount (even on reload).
@@ -142,9 +147,14 @@ router.subscribe(function (navigation) {
   if (navigation.url === '/') {
     sessionStorage.removeItem(LAST_ROUTE_KEY);
     sessionStorage.removeItem(SETTINGS_PAGE_KEY);
-    nonSettingsPage = '/';
+    nonSettingsPage = DEFAULT_PAGE;
+    router.goto(DEFAULT_PAGE);
   } else if (navigation.url.startsWith('/preferences')) {
     sessionStorage.setItem(SETTINGS_PAGE_KEY, navigation.url);
+  } else if (navigation.url === DEFAULT_PAGE) {
+    sessionStorage.removeItem(LAST_ROUTE_KEY);
+    sessionStorage.removeItem(SETTINGS_PAGE_KEY);
+    nonSettingsPage = DEFAULT_PAGE;
   } else {
     sessionStorage.setItem(LAST_ROUTE_KEY, navigation.url);
     sessionStorage.removeItem(SETTINGS_PAGE_KEY);
