@@ -95,10 +95,13 @@ export class McpInstallTabPage extends BaseTablePage {
     await this.clickInstallRemoteServer(serverName);
 
     await expect(this.passwordInput).toBeVisible();
-    await this.passwordInput.fill(token);
-    await expect(this.passwordInput).toHaveValue(token);
+    await this.fillSecret(this.passwordInput, token);
 
-    await expect(this.connectButton).toBeEnabled();
-    await this.connectButton.click();
+    try {
+      await expect(this.connectButton).toBeEnabled();
+      await this.connectButton.click();
+    } finally {
+      await this.passwordInput.fill('').catch(() => {});
+    }
   }
 }
