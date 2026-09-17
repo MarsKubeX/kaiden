@@ -18,9 +18,9 @@
 
 import type { OpenShellCLI, OpenShellGateway, ProviderConnectionStatus } from '@openkaiden/api';
 import { inject, injectable, preDestroy } from 'inversify';
-import { IDisposable } from 'node-pty';
 
 import { ApiSenderType } from '/@api/api-sender/api-sender-type.js';
+import type { IDisposable } from '/@api/disposable.js';
 import type { Event } from '/@api/event.js';
 
 import { Emitter } from './events/emitter.js';
