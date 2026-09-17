@@ -49,6 +49,9 @@ const sessionDisplayName: string = $derived.by(() => {
   return session.prompt.trim() ? session.prompt.trim() : 'Session';
 });
 const isWaitingInput = $derived(!isDraft && session?.status === 'waiting_input');
+const hasPendingPermission = $derived(
+  events.some(e => e.kind === 'tool_call' && e.permissionRequest && !e.permissionRequest.resolved),
+);
 const canSendFollowUp = $derived(
   isDraft ||
     (session?.sandboxId &&
@@ -367,11 +370,14 @@ $effect(() => {
 });
 
 $effect(() => {
-  if (isWaitingInput && flowContainer) {
+  if (isWaitingInput && hasPendingPermission && flowContainer) {
     requestAnimationFrame(() => {
       const pending = flowContainer?.querySelectorAll('.tool-call-pending-permission');
       if (pending?.length) {
-        pending[pending.length - 1]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const lastPending = pending[pending.length - 1];
+        lastPending?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const firstButton = lastPending?.querySelector<HTMLButtonElement>('.permission-actions button');
+        firstButton?.focus();
       }
     });
   }
