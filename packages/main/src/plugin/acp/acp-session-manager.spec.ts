@@ -16,8 +16,8 @@
  * SPDX-License-Identifier: Apache-2.0
  ***********************************************************************/
 
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import * as acp from '@agentclientprotocol/sdk';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
@@ -211,22 +211,43 @@ describe('AcpSessionManager', () => {
         undefined,
       );
       expect(result).toHaveLength(1);
-      expect(result[0].isText).toBe(false);
       expect(result[0].remotePath).toMatch(/\/sandbox\/\.kaiden-attachments\/.*\/photo\.png/);
     });
 
-    test('reads text attachments inline without uploading', async () => {
-      vi.mocked(readFile).mockResolvedValue('hello world');
+    test('uploads text attachments to sandbox instead of inlining', async () => {
+      vi.mocked(openshellCli.uploadToSandbox).mockResolvedValue();
 
       const attachments = [{ filePath: '/local/notes.txt', fileName: 'notes.txt', mimeType: 'text/plain' }];
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await (manager as any).uploadAttachments('test-sandbox', attachments);
 
-      expect(openshellCli.uploadToSandbox).not.toHaveBeenCalled();
+      expect(openshellCli.uploadToSandbox).toHaveBeenCalledWith(
+        'test-sandbox',
+        '/local/notes.txt',
+        expect.stringContaining('/sandbox/.kaiden-attachments/'),
+        undefined,
+      );
       expect(result).toHaveLength(1);
-      expect(result[0].isText).toBe(true);
-      expect(result[0].textContent).toBe('hello world');
+      expect(result[0].remotePath).toMatch(/\/sandbox\/\.kaiden-attachments\/.*\/notes\.txt/);
+    });
+
+    test('uploads markdown attachments to sandbox instead of inlining', async () => {
+      vi.mocked(openshellCli.uploadToSandbox).mockResolvedValue();
+
+      const attachments = [{ filePath: '/local/doc.md', fileName: 'doc.md', mimeType: 'text/markdown' }];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await (manager as any).uploadAttachments('test-sandbox', attachments);
+
+      expect(openshellCli.uploadToSandbox).toHaveBeenCalledWith(
+        'test-sandbox',
+        '/local/doc.md',
+        expect.stringContaining('/sandbox/.kaiden-attachments/'),
+        undefined,
+      );
+      expect(result).toHaveLength(1);
+      expect(result[0].remotePath).toMatch(/\/sandbox\/\.kaiden-attachments\/.*\/doc\.md/);
     });
 
     test('uploads PDF attachments to sandbox', async () => {
@@ -238,7 +259,6 @@ describe('AcpSessionManager', () => {
       const result = await (manager as any).uploadAttachments('test-sandbox', attachments);
 
       expect(openshellCli.uploadToSandbox).toHaveBeenCalled();
-      expect(result[0].isText).toBe(false);
       expect(result[0].remotePath).toMatch(/\/sandbox\/\.kaiden-attachments\/.*\/doc\.pdf/);
     });
 
@@ -266,13 +286,12 @@ describe('AcpSessionManager', () => {
   });
 
   describe('buildContentBlocks', () => {
-    test('creates resource_link for uploaded non-text files', () => {
+    test('creates resource_link for uploaded image files', () => {
       const attachments = [
         {
           filePath: '/local/photo.png',
           fileName: 'photo.png',
           mimeType: 'image/png',
-          isText: false,
           remotePath: '/sandbox/.kaiden-attachments/uuid-123/photo.png',
         },
       ];
@@ -283,21 +302,20 @@ describe('AcpSessionManager', () => {
       expect(blocks).toHaveLength(2);
       expect(blocks[0]).toEqual({
         type: 'resource_link',
-        uri: 'file:///sandbox/.kaiden-attachments/uuid-123/photo.png',
+        uri: pathToFileURL('/sandbox/.kaiden-attachments/uuid-123/photo.png').href,
         name: 'photo.png',
         mimeType: 'image/png',
       });
       expect(blocks[1]).toEqual({ type: 'text', text: 'describe this' });
     });
 
-    test('creates resource with inline text for text files', () => {
+    test('creates resource_link for uploaded text files', () => {
       const attachments = [
         {
           filePath: '/local/notes.txt',
           fileName: 'notes.txt',
           mimeType: 'text/plain',
-          isText: true,
-          textContent: 'hello world',
+          remotePath: '/sandbox/.kaiden-attachments/uuid-456/notes.txt',
         },
       ];
 
@@ -306,14 +324,38 @@ describe('AcpSessionManager', () => {
 
       expect(blocks).toHaveLength(2);
       expect(blocks[0]).toEqual({
-        type: 'resource',
-        resource: {
-          uri: 'file:///local/notes.txt',
-          text: 'hello world',
-          mimeType: 'text/plain',
-        },
+        type: 'resource_link',
+        uri: pathToFileURL('/sandbox/.kaiden-attachments/uuid-456/notes.txt').href,
+        name: 'notes.txt',
+        mimeType: 'text/plain',
       });
       expect(blocks[1]).toEqual({ type: 'text', text: 'summarize this' });
+    });
+
+    test('encodes reserved characters in resource_link URI', () => {
+      const remotePath = '/sandbox/.kaiden-attachments/uuid-789/notes#final.md';
+      const attachments = [
+        {
+          filePath: '/local/notes#final.md',
+          fileName: 'notes#final.md',
+          mimeType: 'text/markdown',
+          remotePath,
+        },
+      ];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const blocks = (manager as any).buildContentBlocks('read this', attachments);
+
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]).toEqual({
+        type: 'resource_link',
+        uri: pathToFileURL(remotePath).href,
+        name: 'notes#final.md',
+        mimeType: 'text/markdown',
+      });
+      // The '#' must be percent-encoded so it is not parsed as a URI fragment
+      expect(blocks[0].uri).toBe(pathToFileURL(remotePath).href);
+      expect(blocks[1]).toEqual({ type: 'text', text: 'read this' });
     });
 
     test('creates only text block when no attachments', () => {
