@@ -44,12 +44,13 @@ const apiSender: ApiSenderType = {
 
 const openshellCli: OpenshellCli = {
   getCliPath: vi.fn().mockReturnValue('/usr/bin/openshell'),
-  listSandboxes: vi.fn(),
   uploadToSandbox: vi.fn(),
 } as unknown as OpenshellCli;
 
+const mockSandboxList = vi.fn();
 const sdkSandbox = {
   execInteractive: vi.fn(),
+  list: mockSandboxList,
 };
 const openshellSdkClientManager = {
   getClient: vi.fn().mockResolvedValue({ sandbox: sdkSandbox }),
@@ -104,8 +105,8 @@ describe('AcpSessionManager', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(directories.getAcpSessionsDirectory).mockReturnValue(FAKE_SESSIONS_DIR);
-    vi.mocked(openshellCli.listSandboxes).mockResolvedValue([]);
     vi.mocked(openshellSdkClientManager.getClient).mockResolvedValue({ sandbox: sdkSandbox } as never);
+    mockSandboxList.mockResolvedValue([]);
     manager = new AcpSessionManager(apiSender, openshellCli, agentRegistry, directories, openshellSdkClientManager);
   });
 
@@ -895,8 +896,8 @@ describe('AcpSessionManager', () => {
           events: [],
         }),
       );
-      vi.mocked(openshellCli.listSandboxes).mockResolvedValue([
-        { id: 'other-id', name: 'other-sandbox', phase: 'Ready' },
+      mockSandboxList.mockResolvedValue([
+        { id: 'other-id', name: 'other-sandbox', phase: 'ready', labels: {}, resourceVersion: '1' },
       ]);
 
       await manager.init();
@@ -925,7 +926,9 @@ describe('AcpSessionManager', () => {
           events: [],
         }),
       );
-      vi.mocked(openshellCli.listSandboxes).mockResolvedValue([{ id: 'sb-id', name: 'my-sandbox', phase: 'Ready' }]);
+      mockSandboxList.mockResolvedValue([
+        { id: 'sb-id', name: 'my-sandbox', phase: 'ready', labels: {}, resourceVersion: '1' },
+      ]);
 
       await manager.init();
 
@@ -953,7 +956,9 @@ describe('AcpSessionManager', () => {
           events: [],
         }),
       );
-      vi.mocked(openshellCli.listSandboxes).mockResolvedValue([{ id: 'sb-id', name: 'my-sandbox', phase: 'Deleting' }]);
+      mockSandboxList.mockResolvedValue([
+        { id: 'sb-id', name: 'my-sandbox', phase: 'deleting', labels: {}, resourceVersion: '1' },
+      ]);
 
       await manager.init();
 
@@ -981,7 +986,7 @@ describe('AcpSessionManager', () => {
           events: [],
         }),
       );
-      vi.mocked(openshellCli.listSandboxes).mockRejectedValue(new Error('CLI not found'));
+      mockSandboxList.mockRejectedValue(new Error('CLI not found'));
 
       await manager.init();
 
@@ -1011,7 +1016,7 @@ describe('AcpSessionManager', () => {
           events: [],
         }),
       );
-      vi.mocked(openshellCli.listSandboxes).mockResolvedValue([]);
+      mockSandboxList.mockResolvedValue([]);
 
       await manager.init();
 
@@ -1282,7 +1287,9 @@ describe('AcpSessionManager', () => {
 
     const agent = createAgentInfo();
     vi.mocked(agentRegistry.getAgent).mockResolvedValue(agent);
-    vi.mocked(openshellCli.listSandboxes).mockResolvedValue([createSandbox()]);
+    mockSandboxList.mockResolvedValue([
+      { id: 'sandbox-1', name: 'test-sandbox', phase: 'ready', labels: {}, resourceVersion: '1' },
+    ]);
 
     type ExecStreamEvent = { stream: 'stdout' | 'stderr'; data: Buffer } | { type: 'exit'; exitCode: number };
     const events: ExecStreamEvent[] = [];

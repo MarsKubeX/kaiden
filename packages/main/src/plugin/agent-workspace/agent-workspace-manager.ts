@@ -36,6 +36,7 @@ import { OpenshellGatewayStateManager } from '/@/plugin/openshell-cli/openshell-
 import { buildPolicyObject, rewriteLocalhostUrl } from '/@/plugin/openshell-cli/openshell-network-policy.js';
 import { OpenshellPolicyManager } from '/@/plugin/openshell-cli/openshell-policy-manager.js';
 import { OpenshellSdkClientManager } from '/@/plugin/openshell-cli/openshell-sdk-client-manager.js';
+import { mapSdkSandboxRef } from '/@/plugin/openshell-cli/openshell-sdk-sandbox-mapper.js';
 import { ProviderRegistry } from '/@/plugin/provider-registry.js';
 import { SecretManager } from '/@/plugin/secret-manager/secret-manager.js';
 import { TaskManager } from '/@/plugin/tasks/task-manager.js';
@@ -531,6 +532,12 @@ export class AgentWorkspaceManager implements Disposable {
       // delete doesnt log like create does so matched the convention here
       console.log(`[workspace-timing] deleteSandbox: deleting "${name}" on gateway "${gateway}"`);
       await sdkClient.sandbox.delete(name);
+      try {
+        await sdkClient.sandbox.waitDeleted(name, SANDBOX_DELETE_TIMEOUT_SECONDS);
+      } catch (waitErr: unknown) {
+        const detail = waitErr instanceof Error ? waitErr.message : String(waitErr);
+        console.warn(`[workspace-timing] deleteSandbox: waitDeleted failed for "${name}": ${detail}`);
+      }
       this.apiSender.send('agent-workspace-update');
       if (terminalId) this.closeWorkspaceTerminal(terminalId);
       await rm(this.getGlobalConfigDir(gateway, name), { recursive: true, force: true });
@@ -612,12 +619,28 @@ export class AgentWorkspaceManager implements Disposable {
   }
 
   async listOpenshellSandboxes(): Promise<GatewaySandboxes[]> {
-    const results = await this.openshellCli.listSandboxesPerGateway();
-    for (const entry of results) {
-      for (const sandbox of entry.sandboxes) {
-        if (sandbox.labels) {
-          sandbox.sourcePath = decodeWorkspaceLabels(sandbox.labels);
+    const gateways = this.openshellGatewayStateManager.listGateways();
+    if (gateways.length === 0) {
+      return [];
+    }
+
+    const results: GatewaySandboxes[] = [];
+    for (const gateway of gateways) {
+      try {
+        const client = await this.openshellSdkClientManager.getClient(gateway.name);
+        const refs = await client.sandbox.list();
+        const sandboxes: SandboxInfo[] = refs.map(mapSdkSandboxRef);
+        for (const sandbox of sandboxes) {
+          if (sandbox.labels) {
+            sandbox.sourcePath = decodeWorkspaceLabels(sandbox.labels);
+          }
         }
+        results.push({ gateway, sandboxes });
+      } catch (err: unknown) {
+        console.warn(
+          `[openshell] failed to list sandboxes for gateway ${gateway.name}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        results.push({ gateway, sandboxes: [] });
       }
     }
     return results;
@@ -957,12 +980,6 @@ export class AgentWorkspaceManager implements Disposable {
     this.disposables.push(
       this.openshellGatewayStateManager.onDidUpdateGateways(() => {
         this.apiSender.send('agent-gateway-update');
-      }),
-    );
-
-    this.disposables.push(
-      this.openshellCli.onDidSandboxListChange(() => {
-        this.apiSender.send('agent-workspace-update');
       }),
     );
   }
