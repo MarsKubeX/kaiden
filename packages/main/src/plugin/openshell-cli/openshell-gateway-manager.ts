@@ -330,25 +330,30 @@ export class OpenshellGatewayManager {
     requestMessage.copy(grpcFrame, 5);
 
     return new Promise((resolve, reject) => {
+      let session: ReturnType<typeof h2Connect>;
+      try {
+        const url = new URL(gatewayUrl);
+        const isHttps = url.protocol === 'https:';
+        session = h2Connect(url.origin, {
+          ...(isHttps ? { ca: tlsOpts.ca, cert: tlsOpts.cert, key: tlsOpts.key } : {}),
+        });
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+
       let settled = false;
+      const timer = setTimeout(() => {
+        settle(reject, new Error('GetGatewayInfo gRPC call timed out'));
+        session.destroy();
+      }, GRPC_CALL_TIMEOUT_MS);
+
       const settle = (fn: typeof resolve | typeof reject, value: Buffer | Error): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         (fn as (v: Buffer | Error) => void)(value);
       };
-
-      const timer = setTimeout(() => {
-        settle(reject, new Error('GetGatewayInfo gRPC call timed out'));
-        session.destroy();
-      }, GRPC_CALL_TIMEOUT_MS);
-
-      const url = new URL(gatewayUrl);
-      const isHttps = url.protocol === 'https:';
-
-      const session = h2Connect(url.origin, {
-        ...(isHttps ? { ca: tlsOpts.ca, cert: tlsOpts.cert, key: tlsOpts.key } : {}),
-      });
 
       session.on('error', err => {
         settle(reject, err);
