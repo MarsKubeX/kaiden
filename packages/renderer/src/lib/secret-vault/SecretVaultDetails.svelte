@@ -6,13 +6,13 @@ import { router } from 'tinro';
 
 import { withConfirmation } from '/@/lib/dialogs/messagebox-utils';
 import { getSecretIcon, getServiceLabel } from '/@/lib/secret-vault/secret-vault-utils';
+import type { SecretVaultInfoUI } from '/@/lib/secret-vault/SecretVaultInfoUI';
 import Badge from '/@/lib/ui/Badge.svelte';
 import DetailsPage from '/@/lib/ui/DetailsPage.svelte';
 import ListItemButtonIcon from '/@/lib/ui/ListItemButtonIcon.svelte';
 import { getTabUrl, isTabSelected } from '/@/lib/ui/Util';
 import Route from '/@/Route.svelte';
 import { secretVaultInfos } from '/@/stores/secret-vault';
-import type { SecretVaultInfo } from '/@api/secret-vault/secret-vault-info';
 
 import SecretVaultDetailsSummary from './SecretVaultDetailsSummary.svelte';
 
@@ -22,21 +22,28 @@ interface Props {
 
 let { id }: Props = $props();
 
-const secretInfo: SecretVaultInfo | undefined = $derived($secretVaultInfos.find(s => s.id === id));
+const secretInfo: SecretVaultInfoUI | undefined = $derived($secretVaultInfos.find(s => s.id === id));
 const secretIcon = $derived(getSecretIcon(secretInfo?.type));
 
 function handleRemove(): void {
   if (!secretInfo) {
     return;
   }
+  const secret = $state.snapshot(secretInfo);
   withConfirmation(async () => {
     try {
-      await window.removeSecret(secretInfo.name, secretInfo.gateway);
+      await window.removeSecret(secret.name, secret.gateway);
       router.goto('/preferences/secret-vault');
     } catch (error: unknown) {
-      console.error('Failed to remove secret', error);
+      await window.showMessageBox({
+        title: 'Error',
+        type: 'error',
+        message: `Failed to remove secret ${secret.name}`,
+        detail: String(error),
+        buttons: ['OK'],
+      });
     }
-  }, `remove secret ${secretInfo.name}`);
+  }, `remove secret ${secret.name}`);
 }
 </script>
 
