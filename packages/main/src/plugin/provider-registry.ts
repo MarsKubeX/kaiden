@@ -1665,7 +1665,7 @@ export class ProviderRegistry {
   onDidSetConnectionFactoryCallback(
     provider: ProviderImpl,
     factory: ProviderConnectionFactory,
-    factoryType: 'container' | 'kubernetes' | 'vm' | 'inference',
+    factoryType: 'container' | 'kubernetes' | 'vm' | 'inference' | 'rag' | 'chunk' | 'semanticRouter',
   ): void {
     this._onDidSetConnectionFactory.fire({
       providerId: provider.id,
@@ -1675,16 +1675,18 @@ export class ProviderRegistry {
       emptyConnectionMarkdownDescription: provider.emptyConnectionMarkdownDescription,
       images: provider.images,
     });
+    this.apiSender.send('provider-change', {});
   }
 
   onDidUnsetConnectionFactoryCallback(
     provider: ProviderImpl,
-    factoryType: 'container' | 'kubernetes' | 'vm' | 'inference',
+    factoryType: 'container' | 'kubernetes' | 'vm' | 'inference' | 'rag' | 'chunk' | 'semanticRouter',
   ): void {
     this._onDidUnsetConnectionFactory.fire({
       providerId: provider.id,
       type: factoryType,
     });
+    this.apiSender.send('provider-change', {});
   }
 
   getConnectionFactories(): ConnectionFactoryDetails[] {
