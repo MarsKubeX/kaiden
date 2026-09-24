@@ -41,8 +41,13 @@
 
 declare module '@openkaiden/api' {
   import type { ProviderV3, ProviderV4 } from '@ai-sdk/provider' with { 'resolution-mode': 'import' };
+  import type { ProviderProfile as OpenshellProviderProfile } from '@nvidia/openshell-sdk/raw' with {
+    'resolution-mode': 'import',
+  };
 
   type AISDKInferenceProvider = ProviderV3 | ProviderV4;
+
+  export type ProviderProfile = OpenshellProviderProfile;
   import type { components } from '@openkaiden/mcp-registry-types';
   import type { components as workspaceConfigComponents } from '@openkaiden/workspace-configuration';
 
@@ -5594,5 +5599,10 @@ declare module '@openkaiden/api' {
     export function registerCLI(cli: OpenShellCLI): Disposable;
     export const onDidRegisterCLI: Event<OpenShellCLI>;
     export const onDidUnregisterCLI: Event<OpenShellCLI>;
+    export function registerProfile(profile: ProviderProfile): Disposable;
+    export function getProfiles(): ReadonlyArray<ProviderProfile>;
+    export const onDidRegisterProfile: Event<ProviderProfile>;
+    export const onDidUnregisterProfile: Event<ProviderProfile>;
+    export const onDidUpdateProfile: Event<ProviderProfile>;
   }
 }
