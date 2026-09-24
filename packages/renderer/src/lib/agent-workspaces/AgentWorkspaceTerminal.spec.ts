@@ -19,12 +19,12 @@
 import '@testing-library/jest-dom/vitest';
 
 import { render, screen, waitFor } from '@testing-library/svelte';
+import { Terminal } from '@xterm/xterm';
 import { tick } from 'svelte';
-import { get, writable } from 'svelte/store';
+import { writable } from 'svelte/store';
 import { router } from 'tinro';
 import { beforeEach, expect, test, vi } from 'vitest';
 
-import { agentWorkspaceTerminals } from '/@/stores/agent-workspace-terminal-store';
 import { openshellSandboxes } from '/@/stores/openshell-sandboxes';
 import type { GatewaySandboxes } from '/@api/openshell-gateway-info';
 
@@ -67,7 +67,6 @@ beforeEach(() => {
     return undefined;
   });
   shellInAgentWorkspaceMock = vi.mocked(window.shellInAgentWorkspace);
-  agentWorkspaceTerminals.set([]);
   openshellSandboxes.set([]);
 });
 
@@ -142,31 +141,192 @@ test('writes received data to xterm terminal', async () => {
   });
 });
 
-test('serializes terminal buffer to store on unmount', async () => {
+test('detaches from the agent session on unmount without closing it', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  shellInAgentWorkspaceMock.mockResolvedValue(42);
+
+  const renderObject = render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalled());
+  await waitFor(() => expect(window.shellInAgentWorkspaceResize).toHaveBeenCalled());
+
+  renderObject.unmount();
+
+  expect(window.shellInAgentWorkspaceClose).toHaveBeenCalledWith(42);
+});
+
+test('attaches again through shellInAgentWorkspace when remounted', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  shellInAgentWorkspaceMock.mockResolvedValue(42);
+
+  const first = render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(1));
+  first.unmount();
+
+  render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(2));
+});
+
+test('closes the previous attachment before reconnecting on a status transition', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  const calls: string[] = [];
+  vi.mocked(window.shellInAgentWorkspaceClose).mockImplementation(async id => {
+    calls.push(`close:${id}`);
+  });
+  shellInAgentWorkspaceMock.mockImplementation(async () => {
+    calls.push('attach');
+    return calls.filter(c => c === 'attach').length === 1 ? 42 : 43;
+  });
+
+  render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() =>
+    expect(window.shellInAgentWorkspaceResize).toHaveBeenCalledWith(42, expect.anything(), expect.anything()),
+  );
+
+  // the workspace flickers through a non-ready phase and back while the callback is still attached
+  openshellSandboxes.set([getWorkspace('Provisioning')]);
+  await tick();
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(2));
+
+  expect(calls).toEqual(['attach', 'close:42', 'attach']);
+});
+
+test('closes an attachment that completes after unmount', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  let resolveAttach: (id: number) => void = () => {};
+  shellInAgentWorkspaceMock.mockImplementation(() => new Promise<number>(r => (resolveAttach = r)));
+
+  const renderObject = render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalled());
+
+  renderObject.unmount();
+  expect(window.shellInAgentWorkspaceClose).not.toHaveBeenCalled();
+  resolveAttach(42);
+
+  await waitFor(() => expect(window.shellInAgentWorkspaceClose).toHaveBeenCalledWith(42));
+  expect(window.shellInAgentWorkspaceResize).not.toHaveBeenCalled();
+});
+
+test('a status transition during the initial attach does not start a second attach', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  let resolveAttach: (id: number) => void = () => {};
+  shellInAgentWorkspaceMock.mockImplementation(() => new Promise<number>(r => (resolveAttach = r)));
+
+  render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(1));
+
+  openshellSandboxes.set([getWorkspace('Provisioning')]);
+  await tick();
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  await tick();
+  resolveAttach(42);
+  await waitFor(() =>
+    expect(window.shellInAgentWorkspaceResize).toHaveBeenCalledWith(42, expect.anything(), expect.anything()),
+  );
+
+  expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(1);
+});
+
+test('unmounting while the terminal settings load creates no terminal and no attachment', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  let resolveConfig: (value: number) => void = () => {};
+  vi.mocked(window.getConfigurationValue).mockImplementation(() => new Promise<number>(r => (resolveConfig = r)));
+
+  const renderObject = render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() => expect(window.getConfigurationValue).toHaveBeenCalled());
+  renderObject.unmount();
+  const settle = (): Promise<void> => new Promise(r => setTimeout(r, 0));
+  for (let i = 0; i < 3; i++) {
+    resolveConfig(1);
+    await settle();
+  }
+
+  expect(shellInAgentWorkspaceMock).not.toHaveBeenCalled();
+  expect(renderObject.container.querySelector('.xterm')).toBeNull();
+});
+
+test('detaches the new callback when the initial resize fails', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  shellInAgentWorkspaceMock.mockResolvedValue(42);
+  vi.mocked(window.shellInAgentWorkspaceResize).mockRejectedValueOnce(new Error('resize failed'));
+
+  render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+
+  await waitFor(() => expect(window.shellInAgentWorkspaceClose).toHaveBeenCalledWith(42));
+});
+
+test('a retry that fires while an attach is in flight stays pending until the attach settles', async () => {
+  vi.useFakeTimers();
   openshellSandboxes.set([getWorkspace('Ready')]);
 
-  let onDataCallback: (data: string) => void = () => {};
-  const sendCallbackId = 42;
+  let onEndCallback: () => void = () => {};
+  let resolveShell: ((id: number) => void) | undefined;
   shellInAgentWorkspaceMock.mockImplementation(
-    async (_id: string, onData: (data: string) => void, _onError: (error: string) => void, _onEnd: () => void) => {
+    async (_id: string, _onData: (data: string) => void, _onError: (error: string) => void, onEnd: () => void) => {
+      onEndCallback = onEnd;
+      return 42;
+    },
+  );
+  const renderObject = render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  // wait for the initial attachment to be fully established, not only requested
+  await vi.waitFor(() => expect(window.shellInAgentWorkspaceResize).toHaveBeenCalledTimes(1));
+  await vi.advanceTimersByTimeAsync(0);
+
+  // the reconnect attach takes longer than the retry delay
+  shellInAgentWorkspaceMock.mockImplementation(() => new Promise<number>(resolve => (resolveShell = resolve)));
+  onEndCallback();
+  await vi.waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(2));
+  // a second end while that attach is in flight schedules the safety-net retry
+  onEndCallback();
+  await vi.advanceTimersByTimeAsync(2000);
+  // the retry fired during the in-flight attach: it must stay pending rather than being consumed
+  expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(2);
+
+  shellInAgentWorkspaceMock.mockResolvedValue(43);
+  resolveShell?.(42);
+  await vi.advanceTimersByTimeAsync(2000);
+
+  await vi.waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(3));
+
+  renderObject.unmount();
+  vi.useRealTimers();
+});
+
+test('reattaches into a fresh xterm so the replayed screen is not duplicated', async () => {
+  openshellSandboxes.set([getWorkspace('Ready')]);
+  const disposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
+  let onDataCallback: (data: string) => void = () => {};
+  let onEndCallback: () => void = () => {};
+  shellInAgentWorkspaceMock.mockImplementation(
+    async (_id: string, onData: (data: string) => void, _onError: (error: string) => void, onEnd: () => void) => {
       onDataCallback = onData;
-      return sendCallbackId;
+      onEndCallback = onEnd;
+      return 42;
     },
   );
 
   const renderObject = render(AgentWorkspaceTerminal, { workspaceId: 'ws-1', screenReaderMode: true });
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(1));
+  onDataCallback('old output');
+  await waitFor(() =>
+    expect(renderObject.container.querySelector('div[aria-live="assertive"]')).toHaveTextContent('old output'),
+  );
 
-  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalled());
+  const oldTextarea = renderObject.container.querySelector<HTMLTextAreaElement>('.xterm textarea');
+  oldTextarea?.focus();
+  expect(document.activeElement).toBe(oldTextarea);
 
-  onDataCallback('test output');
+  onEndCallback();
+  await waitFor(() => expect(shellInAgentWorkspaceMock).toHaveBeenCalledTimes(2));
 
-  expect(get(agentWorkspaceTerminals)).toHaveLength(0);
-
-  renderObject.unmount();
-
-  const terminals = get(agentWorkspaceTerminals);
-  expect(terminals).toHaveLength(1);
-  expect(terminals[0]?.workspaceId).toBe('ws-1');
+  expect(disposeSpy).toHaveBeenCalledTimes(1);
+  expect(renderObject.container.querySelectorAll('.xterm')).toHaveLength(1);
+  expect(renderObject.container.querySelector('div[aria-live="assertive"]')).not.toHaveTextContent('old output');
+  // keyboard focus moves to the replacement so keystrokes keep reaching the agent
+  const newTextarea = renderObject.container.querySelector<HTMLTextAreaElement>('.xterm textarea');
+  expect(newTextarea).not.toBe(oldTextarea);
+  expect(document.activeElement).toBe(newTextarea);
+  disposeSpy.mockRestore();
 });
 
 test('receiveEndCallback reconnects when shell ends while workspace is running', async () => {

@@ -434,13 +434,6 @@ export function initExposure(): void {
   });
 
   contextBridge.exposeInMainWorld(
-    'shellInAgentWorkspaceReattach',
-    (callbackId: number, onData: (data: string) => void, onError: (error: string) => void, onEnd: () => void): void => {
-      onDataCallbacksShellInAgentWorkspace.set(callbackId, { onData, onError, onEnd });
-    },
-  );
-
-  contextBridge.exposeInMainWorld(
     'shellInAgentWorkspaceSend',
     async (dataId: number, content: string): Promise<void> => {
       return ipcInvoke('agent-workspace:terminalSend', dataId, content);

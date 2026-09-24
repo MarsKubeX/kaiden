@@ -22,6 +22,8 @@ import { basename, isAbsolute, join, posix, resolve } from 'node:path';
 
 import type { ExecInteractiveSession } from '@nvidia/openshell-sdk';
 import type { Disposable } from '@openkaiden/api';
+import { SerializeAddon } from '@xterm/addon-serialize';
+import { Terminal as HeadlessTerminal } from '@xterm/headless';
 import type { WebContents } from 'electron';
 import { inject, injectable, preDestroy } from 'inversify';
 
@@ -61,6 +63,7 @@ import type {
   SandboxInfo,
 } from '/@api/openshell-gateway-info.js';
 import { AGENT_LABEL, decodeWorkspaceLabels, WORKSPACE_LABEL } from '/@api/openshell-gateway-info.js';
+import { TerminalSettings } from '/@api/terminal/terminal-settings.js';
 
 import { dedupeOpenshellMounts, partitionOpenshellUploads, resolveOpenshellMountTarget } from './openshell-mounts.js';
 
@@ -71,14 +74,41 @@ const MOUNT_HOME_PREFIX = '$HOME';
 // Timeouts for sandbox startup and deletion cleanup for sdk.
 const SANDBOX_READY_TIMEOUT_SECONDS = 300;
 const SANDBOX_DELETE_TIMEOUT_SECONDS = 120;
+const DEFAULT_TERMINAL_SCROLLBACK = 1000;
+
+export interface AgentTerminalClient {
+  onData: (content: string) => void;
+  onError?: (error: string) => void;
+  onEnd: () => void;
+}
+
+export interface AgentTerminalHandle {
+  write: (content: string) => void;
+  resize: (cols: number, rows: number) => void;
+  detach: () => void;
+}
+
+// an agent session being started; cancelled when its workspace is deleted or the manager is disposed meanwhile
+interface PendingAgentStart {
+  sandboxName: string;
+  gateway: string;
+  cancelled: boolean;
+  promise: Promise<WorkspaceTerminalSession>;
+}
 
 interface WorkspaceTerminalSession {
-  callbackId: number;
+  // attached consumers: renderer terminals and others (e.g. the CLI through the API server)
+  clients: Set<AgentTerminalClient>;
   execSession: ExecInteractiveSession;
   abortController: AbortController;
   write: (param: string) => void;
   resize: (w: number, h: number) => void;
-  commandExecuted: boolean;
+  sandboxName: string;
+  gateway: string;
+  // mirror of the terminal screen, replayed when a client attaches
+  screen: HeadlessTerminal;
+  serializer: SerializeAddon;
+  ended: boolean;
 }
 
 export function encodeWorkspaceLabels(sourcePath: string): Record<string, string> {
@@ -99,6 +129,11 @@ export function encodeWorkspaceLabels(sourcePath: string): Record<string, string
 @injectable()
 export class AgentWorkspaceManager implements Disposable {
   private readonly workspaceTerminals = new Map<string, WorkspaceTerminalSession>();
+  private readonly startingAgentSessions = new Map<string, PendingAgentStart>();
+  // renderer terminals by callback id; ids restart from zero on a renderer reload, so a stale entry is replaced on attach
+  private readonly rendererTerminals = new Map<number, AgentTerminalHandle>();
+  // bumped on every renderer reload so that a terminal request from the previous renderer is dropped
+  private rendererGeneration = 0;
   private readonly disposables: Disposable[] = [];
 
   constructor(
@@ -304,7 +339,7 @@ export class AgentWorkspaceManager implements Disposable {
     });
     // Show phase for provisioning now then create will refreshes the ready or error phase later
     this.apiSender.send('agent-workspace-update');
-    await sdkClient.sandbox.waitReady(sandboxName, SANDBOX_READY_TIMEOUT_SECONDS);
+    const sandboxRef = await sdkClient.sandbox.waitReady(sandboxName, SANDBOX_READY_TIMEOUT_SECONDS);
     const tSandbox = performance.now();
     console.log(`[workspace-timing] createSandbox: ${(tSandbox - tV2).toFixed(0)}ms`);
 
@@ -331,6 +366,13 @@ export class AgentWorkspaceManager implements Disposable {
         throw new Error(`${detail}; failed to clean up sandbox "${sandboxName}": ${cleanupDetail}`, { cause: err });
       }
       throw err;
+    }
+
+    // the agent lifecycle belongs to the workspace: start it now so the terminal only has to attach
+    try {
+      await this.ensureAgentSession(sandboxRef.id, sandboxName, options.gateway, async () => agent.command);
+    } catch (err: unknown) {
+      console.warn(`[AgentWorkspace] unable to start agent in workspace "${sandboxName}":`, err);
     }
 
     return { id: sandboxName };
@@ -520,11 +562,11 @@ export class AgentWorkspaceManager implements Disposable {
       .flatMap(entry => entry.sandboxes)
       .find(ws => ws.id === id);
     const workspaceName = workspace?.name ?? id;
-    await this.deleteWorkspace(workspaceName, gateway, id);
+    await this.deleteWorkspace(workspaceName, gateway);
     return { id };
   }
 
-  private async deleteWorkspace(name: string, gateway: string, terminalId?: string): Promise<void> {
+  private async deleteWorkspace(name: string, gateway: string): Promise<void> {
     const task = this.taskManager.createTask({ title: `Deleting workspace "${name}"` });
     task.state = 'running';
     task.status = 'in-progress';
@@ -543,7 +585,7 @@ export class AgentWorkspaceManager implements Disposable {
         console.warn(`[workspace-timing] deleteSandbox: waitDeleted failed for "${name}": ${detail}`);
       }
       this.apiSender.send('agent-workspace-update');
-      if (terminalId) this.closeWorkspaceTerminal(terminalId);
+      this.closeWorkspaceTerminals(name, gateway);
       await rm(this.getGlobalConfigDir(gateway, name), { recursive: true, force: true });
       task.status = 'success';
     } catch (err: unknown) {
@@ -726,32 +768,261 @@ export class AgentWorkspaceManager implements Disposable {
     };
   }
 
-  private getWorkspaceTerminalByCallbackId(callbackId: number): WorkspaceTerminalSession | undefined {
-    return Array.from(this.workspaceTerminals.values()).find(session => session.callbackId === callbackId);
+  // one agent session per workspace: concurrent callers (creation, gateway start, terminal) share the same start
+  private async ensureAgentSession(
+    workspaceId: string,
+    sandboxName: string,
+    gateway: string,
+    resolveAgentCommand: () => Promise<string | undefined>,
+  ): Promise<WorkspaceTerminalSession> {
+    const existing = this.workspaceTerminals.get(workspaceId);
+    if (existing) {
+      return existing;
+    }
+    let starting = this.startingAgentSessions.get(workspaceId);
+    if (!starting) {
+      const start = { sandboxName, gateway, cancelled: false } as PendingAgentStart;
+      start.promise = resolveAgentCommand()
+        .then(agentCommand => this.startAgentSession(workspaceId, start, agentCommand))
+        .finally(() => this.startingAgentSessions.delete(workspaceId));
+      this.startingAgentSessions.set(workspaceId, start);
+      starting = start;
+    }
+    return starting.promise;
   }
 
-  private closeWorkspaceTerminal(workspaceId: string): void {
-    const session = this.workspaceTerminals.get(workspaceId);
-    if (!session) {
+  private async resolveAgentCommand(sandbox: SandboxInfo): Promise<string | undefined> {
+    const agentId = sandbox.labels?.[AGENT_LABEL];
+    if (!agentId) {
+      return undefined;
+    }
+    try {
+      return (await this.agentRegistry.getAgent(agentId))?.command;
+    } catch (err: unknown) {
+      console.error(`Failed to resolve agent command for workspace "${sandbox.id}":`, err);
+      return undefined;
+    }
+  }
+
+  private async startAgentSession(
+    workspaceId: string,
+    start: PendingAgentStart,
+    agentCommand: string | undefined,
+  ): Promise<WorkspaceTerminalSession> {
+    const { sandboxName, gateway } = start;
+    const screen = new HeadlessTerminal({
+      allowProposedApi: true,
+      scrollback:
+        this.configurationRegistry
+          .getConfiguration(TerminalSettings.SectionName)
+          .get<number>(TerminalSettings.Scrollback) ?? DEFAULT_TERMINAL_SCROLLBACK,
+    });
+    const serializer = new SerializeAddon();
+    screen.loadAddon(serializer);
+    // created before the exec so that early output is not lost
+    const clients = new Set<AgentTerminalClient>();
+    const session: Partial<WorkspaceTerminalSession> = {
+      sandboxName,
+      gateway,
+      screen,
+      serializer,
+      clients,
+      ended: false,
+    };
+    let commandPending = !!agentCommand;
+    let sawOutput = false;
+    // the agent command is typed once the shell has printed something (i.e. is ready)
+    const sendAgentCommand = (): void => {
+      if (commandPending && sawOutput && session.write) {
+        commandPending = false;
+        session.write(`${agentCommand}\n`);
+      }
+    };
+    let invocation: Awaited<ReturnType<AgentWorkspaceManager['shellInAgentWorkspace']>>;
+    try {
+      invocation = await this.shellInAgentWorkspace(
+        sandboxName,
+        gateway,
+        (content: string) => {
+          sawOutput = true;
+          screen.write(content);
+          for (const client of clients) client.onData(content);
+          sendAgentCommand();
+        },
+        (error: string) => {
+          for (const client of clients) client.onError?.(error);
+        },
+        () => {
+          session.ended = true;
+          if (this.workspaceTerminals.get(workspaceId) === session) {
+            this.workspaceTerminals.delete(workspaceId);
+          }
+          screen.dispose();
+          for (const client of clients) client.onEnd();
+          clients.clear();
+        },
+      );
+    } catch (err: unknown) {
+      screen.dispose();
+      throw err;
+    }
+    Object.assign(session, invocation, {
+      resize: (cols: number, rows: number): void => {
+        invocation.resize(cols, rows);
+        screen.resize(cols, rows);
+      },
+    });
+    const started = session as WorkspaceTerminalSession;
+    if (start.cancelled) {
+      // the workspace was deleted or the manager disposed while the shell was starting
+      this.closeSession(started);
+      throw new Error(`agent session in workspace "${sandboxName}" was cancelled`);
+    }
+    if (started.ended) {
+      throw new Error(`agent session in workspace "${sandboxName}" ended before it could be used`);
+    }
+    this.workspaceTerminals.set(workspaceId, started);
+    sendAgentCommand();
+    return started;
+  }
+
+  // replays the current screen to the client, then forwards live output until detached
+  private attachClient(session: WorkspaceTerminalSession, client: AgentTerminalClient): AgentTerminalHandle {
+    if (session.ended) {
+      client.onEnd();
+      return { write: (): void => {}, resize: (): void => {}, detach: (): void => {} };
+    }
+    // output received from now on is queued after the snapshot marker, so it is not part of the snapshot: buffer it
+    let pending: string[] | undefined = [];
+    let detached = false;
+    const listener: AgentTerminalClient = {
+      onData: content => (pending ? pending.push(content) : client.onData(content)),
+      onError: error => client.onError?.(error),
+      onEnd: () => client.onEnd(),
+    };
+    session.clients.add(listener);
+    session.screen.write('', () => {
+      // the write queue still flushes after the screen was disposed
+      if (detached || session.ended) {
+        return;
+      }
+      const snapshot = session.serializer.serialize();
+      if (snapshot) {
+        client.onData(snapshot);
+      }
+      for (const content of pending ?? []) client.onData(content);
+      pending = undefined;
+    });
+    return {
+      write: session.write,
+      // last writer wins when the UI and a CLI are attached with different sizes
+      resize: session.resize,
+      detach: (): void => {
+        detached = true;
+        session.clients.delete(listener);
+      },
+    };
+  }
+
+  // attaches a non-renderer client to the agent session of a workspace: replays the screen then forwards live output
+  async attachAgentTerminal(
+    sandboxName: string,
+    gateway: string | undefined,
+    client: AgentTerminalClient,
+  ): Promise<AgentTerminalHandle> {
+    const match = (await this.listOpenshellSandboxes())
+      .flatMap(gw => gw.sandboxes.map(sandbox => ({ sandbox, gatewayName: gw.gateway.name })))
+      .find(({ sandbox, gatewayName }) => sandbox.name === sandboxName && (!gateway || gatewayName === gateway));
+    if (!match) {
+      throw new Error(`workspace "${sandboxName}" not found. Use "workspace list" to see available workspaces.`);
+    }
+    const { sandbox, gatewayName } = match;
+    const session = await this.ensureAgentSession(sandbox.id, sandbox.name, gatewayName, () =>
+      this.resolveAgentCommand(sandbox),
+    );
+    return this.attachClient(session, client);
+  }
+
+  private sendToRenderer(channel: string, ...args: unknown[]): void {
+    if (!this.webContents.isDestroyed()) {
+      this.webContents.send(channel, ...args);
+    }
+  }
+
+  // attaches a renderer terminal (identified by its preload callback id) to the agent session of a workspace
+  private attachRendererTerminal(session: WorkspaceTerminalSession, callbackId: number, generation: number): void {
+    // the request came from a renderer that has since reloaded: its callback id now belongs to another terminal
+    if (generation !== this.rendererGeneration) {
       return;
     }
+    // a renderer reload restarts callback ids from zero: an entry with this id belongs to a terminal that is gone
+    this.rendererTerminals.get(callbackId)?.detach();
+    this.rendererTerminals.delete(callbackId);
+    if (session.ended) {
+      this.sendToRenderer('agent-workspace:terminal-onEnd', callbackId);
+      return;
+    }
+    const handle = this.attachClient(session, {
+      onData: content => this.sendToRenderer('agent-workspace:terminal-onData', callbackId, content),
+      onError: error => this.sendToRenderer('agent-workspace:terminal-onError', callbackId, error),
+      onEnd: () => {
+        if (this.rendererTerminals.get(callbackId) === handle) {
+          this.rendererTerminals.delete(callbackId);
+        }
+        this.sendToRenderer('agent-workspace:terminal-onEnd', callbackId);
+      },
+    });
+    this.rendererTerminals.set(callbackId, handle);
+  }
+
+  private detachRendererTerminals(): void {
+    for (const handle of this.rendererTerminals.values()) {
+      handle.detach();
+    }
+    this.rendererTerminals.clear();
+  }
+
+  // start agents of existing workspaces (e.g. after an application restart) without waiting for a terminal
+  private async startAgentSessions(): Promise<void> {
+    const targets = (await this.listOpenshellSandboxes()).flatMap(({ gateway, sandboxes }) =>
+      sandboxes
+        .filter(sandbox => sandbox.phase === 'Ready' && sandbox.labels?.[AGENT_LABEL])
+        .map(sandbox => ({ gateway, sandbox })),
+    );
+    await Promise.all(
+      targets.map(({ gateway, sandbox }) =>
+        this.ensureAgentSession(sandbox.id, sandbox.name, gateway.name, () => this.resolveAgentCommand(sandbox)).catch(
+          (err: unknown) => {
+            console.warn(`[AgentWorkspace] unable to start agent in workspace "${sandbox.name}":`, err);
+          },
+        ),
+      ),
+    );
+  }
+
+  private closeWorkspaceTerminals(sandboxName: string, gateway: string): void {
+    for (const start of this.startingAgentSessions.values()) {
+      if (start.sandboxName === sandboxName && start.gateway === gateway) {
+        start.cancelled = true;
+      }
+    }
+    for (const [workspaceId, session] of this.workspaceTerminals) {
+      if (session.sandboxName === sandboxName && session.gateway === gateway) {
+        this.closeSession(session);
+        this.workspaceTerminals.delete(workspaceId);
+      }
+    }
+  }
+
+  private closeSession(session: WorkspaceTerminalSession): void {
+    session.ended = true;
     try {
       session.execSession.close();
     } catch {
       /* already closed */
     }
     session.abortController.abort();
-    this.workspaceTerminals.delete(workspaceId);
-  }
-
-  private closeWorkspaceTerminalByCallbackId(callbackId: number): void {
-    const entry = Array.from(this.workspaceTerminals.entries()).find(
-      ([, session]) => session.callbackId === callbackId,
-    );
-    if (!entry) {
-      return;
-    }
-    this.closeWorkspaceTerminal(entry[0]);
+    session.screen.dispose();
   }
 
   init(): void {
@@ -842,6 +1113,7 @@ export class AgentWorkspaceManager implements Disposable {
     this.ipcHandle(
       'agent-workspace:terminal',
       async (_listener: unknown, id: string, onDataId: number): Promise<number> => {
+        const generation = this.rendererGeneration;
         const workspaces = await this.listOpenshellSandboxes();
         let workspace: SandboxInfo | undefined;
         let gatewayName: string | undefined;
@@ -857,77 +1129,11 @@ export class AgentWorkspaceManager implements Disposable {
           throw new Error(`workspace "${id}" not found. Use "workspace list" to see available workspaces.`);
         }
 
-        const existingSession = this.workspaceTerminals.get(id);
-        const commandExecuted = existingSession?.commandExecuted ?? false;
-        if (existingSession) {
-          this.closeWorkspaceTerminal(id);
-        }
-
-        const shouldExecuteCommand = !commandExecuted;
-        let agentCommand: string | undefined;
-        if (shouldExecuteCommand && workspace.labels) {
-          const agentId = workspace.labels[AGENT_LABEL];
-          if (agentId) {
-            try {
-              const agent = await this.agentRegistry.getAgent(agentId);
-              agentCommand = agent?.command;
-            } catch (err: unknown) {
-              console.error(`Failed to resolve agent command for workspace "${id}":`, err);
-            }
-          }
-        }
-
-        let commandSent = false;
-        const invocation = await this.shellInAgentWorkspace(
-          workspace.name,
-          gatewayName,
-          (content: string) => {
-            const session = this.workspaceTerminals.get(id);
-            if (session && session.execSession !== invocation.execSession) {
-              return;
-            }
-            if (!this.webContents.isDestroyed()) {
-              this.webContents.send('agent-workspace:terminal-onData', session?.callbackId ?? onDataId, content);
-            }
-            if (!commandSent && agentCommand) {
-              commandSent = true;
-              invocation.write(`${agentCommand}\n`);
-              const activeSession = this.workspaceTerminals.get(id);
-              if (activeSession?.execSession === invocation.execSession) {
-                activeSession.commandExecuted = true;
-              }
-            }
-          },
-          (error: string) => {
-            const session = this.workspaceTerminals.get(id);
-            if (session && session.execSession !== invocation.execSession) {
-              return;
-            }
-            if (!this.webContents.isDestroyed()) {
-              this.webContents.send('agent-workspace:terminal-onError', session?.callbackId ?? onDataId, error);
-            }
-          },
-          () => {
-            const session = this.workspaceTerminals.get(id);
-            if (session && session.execSession !== invocation.execSession) {
-              return;
-            }
-            if (!this.webContents.isDestroyed()) {
-              this.webContents.send('agent-workspace:terminal-onEnd', session?.callbackId ?? onDataId);
-            }
-            if (session?.execSession === invocation.execSession) {
-              this.workspaceTerminals.delete(id);
-            }
-          },
+        // no running session (app restarted before the gateway was up or the shell exited): start the agent again
+        const session = await this.ensureAgentSession(id, workspace.name, gatewayName, () =>
+          this.resolveAgentCommand(workspace),
         );
-        this.workspaceTerminals.set(id, {
-          callbackId: onDataId,
-          execSession: invocation.execSession,
-          abortController: invocation.abortController,
-          write: invocation.write,
-          resize: invocation.resize,
-          commandExecuted,
-        });
+        this.attachRendererTerminal(session, onDataId, generation);
         return onDataId;
       },
     );
@@ -935,36 +1141,55 @@ export class AgentWorkspaceManager implements Disposable {
     this.ipcHandle(
       'agent-workspace:terminalSend',
       async (_listener: unknown, onDataId: number, content: string): Promise<void> => {
-        const session = this.getWorkspaceTerminalByCallbackId(onDataId);
-        if (session) {
-          session.write(content);
-        }
+        this.rendererTerminals.get(onDataId)?.write(content);
       },
     );
 
     this.ipcHandle(
       'agent-workspace:terminalResize',
       async (_listener: unknown, onDataId: number, width: number, height: number): Promise<void> => {
-        const session = this.getWorkspaceTerminalByCallbackId(onDataId);
-        if (session) {
-          session.resize(width, height);
-        }
+        this.rendererTerminals.get(onDataId)?.resize(width, height);
       },
     );
 
+    // the renderer terminal went away: keep the agent running, only stop forwarding its output
     this.ipcHandle('agent-workspace:terminalClose', async (_listener: unknown, onDataId: number): Promise<void> => {
-      this.closeWorkspaceTerminalByCallbackId(onDataId);
+      this.rendererTerminals.get(onDataId)?.detach();
+      this.rendererTerminals.delete(onDataId);
+    });
+
+    // a renderer reload restarts callback ids from zero: drop every renderer attachment before it comes back
+    // (only main-frame document navigations: subframes and in-page navigations keep the terminals attached)
+    const onRendererNavigation = (details: { isMainFrame: boolean; isSameDocument: boolean }): void => {
+      if (details.isMainFrame && !details.isSameDocument) {
+        this.rendererGeneration++;
+        this.detachRendererTerminals();
+      }
+    };
+    this.webContents.on('did-start-navigation', onRendererNavigation);
+    this.disposables.push({
+      dispose: (): void => {
+        if (!this.webContents.isDestroyed()) {
+          this.webContents.removeListener('did-start-navigation', onRendererNavigation);
+        }
+      },
     });
 
     this.disposables.push(
       this.openshellGateway.onDidGatewayStart(() => {
-        this.openshellGatewayStateManager.refresh().catch((err: unknown) => {
-          console.warn(
-            `[AgentWorkspaceManager] unable to refresh gateways after startup: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        });
+        this.openshellGatewayStateManager
+          .refresh()
+          .catch((err: unknown) => {
+            console.warn(
+              `[AgentWorkspaceManager] unable to refresh gateways after startup: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          })
+          .then(() => this.startAgentSessions())
+          .catch((err: unknown) => {
+            console.warn('[AgentWorkspaceManager] unable to start agents after gateway startup:', err);
+          });
         this.apiSender.send('agent-workspace-update');
       }),
     );
@@ -990,15 +1215,14 @@ export class AgentWorkspaceManager implements Disposable {
 
   @preDestroy()
   dispose(): void {
+    for (const start of this.startingAgentSessions.values()) {
+      start.cancelled = true;
+    }
+    this.detachRendererTerminals();
     for (const session of this.workspaceTerminals.values()) {
-      try {
-        session.execSession.close();
-      } catch {
-        /* already closed */
-      }
-      session.abortController.abort();
+      this.closeSession(session);
     }
     this.workspaceTerminals.clear();
-    this.disposables.forEach(disposable => disposable.dispose());
+    for (const disposable of this.disposables) disposable.dispose();
   }
 }

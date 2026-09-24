@@ -29,6 +29,7 @@ import type {
   Configuration,
   ProviderConnectionStatus,
 } from '@openkaiden/api';
+import { Terminal as HeadlessTerminal } from '@xterm/headless';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -154,6 +155,8 @@ const taskManager = {
 const webContents = {
   send: vi.fn(),
   receive: vi.fn(),
+  on: vi.fn(),
+  removeListener: vi.fn(),
   isDestroyed: vi.fn().mockReturnValue(false),
 } as unknown as WebContents;
 
@@ -230,6 +233,8 @@ function getSandboxUploads(): Array<{ local: string; remote: string }> {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(openshellSdkClientManager.getClient).mockResolvedValue({ sandbox: sdkSandbox } as never);
+  sdkSandbox.waitReady.mockResolvedValue({ id: 'ws-created', name: 'my-sandbox' });
+  sdkSandbox.execInteractive.mockImplementation(async () => createMockExecSession().session);
   vi.mocked(taskManager.createTask).mockReturnValue(mockTask);
   mockTask.state = '' as TaskState;
   mockTask.status = '' as TaskStatus;
@@ -2053,74 +2058,7 @@ describe('dispose', () => {
   });
 });
 
-describe('terminal IPC session lifecycle', () => {
-  function createTerminalMockExecSession(): MockExecSession {
-    return createMockExecSession();
-  }
-
-  function getIpcHandler<T>(channel: string): T {
-    return vi.mocked(ipcHandle).mock.calls.find(call => call[0] === channel)![1] as unknown as T;
-  }
-
-  test('closes an active workspace terminal before opening a fresh one', async () => {
-    mockSdkListSandboxes();
-    const first = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(first.session);
-
-    const terminalHandler =
-      getIpcHandler<(_listener: unknown, id: string, onDataId: number) => Promise<number>>('agent-workspace:terminal');
-
-    await terminalHandler({}, 'ws-1', 10);
-
-    const second = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(second.session);
-    await terminalHandler({}, 'ws-1', 11);
-    first.pushEvent({ stream: 'stdout', data: Buffer.from('stale output') });
-    second.pushEvent({ stream: 'stdout', data: Buffer.from('output') });
-
-    expect(first.session.close).toHaveBeenCalled();
-    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(2);
-    await vi.waitFor(() => {
-      expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', 11, 'stale output');
-      expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 11, 'output');
-    });
-  });
-
-  test('routes send and resize through the workspace terminal session and removes it on close', async () => {
-    mockSdkListSandboxes();
-    const mock = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
-
-    const terminalHandler =
-      getIpcHandler<(_listener: unknown, id: string, onDataId: number) => Promise<number>>('agent-workspace:terminal');
-    const sendHandler =
-      getIpcHandler<(_listener: unknown, onDataId: number, content: string) => Promise<void>>(
-        'agent-workspace:terminalSend',
-      );
-    const resizeHandler = getIpcHandler<
-      (_listener: unknown, onDataId: number, width: number, height: number) => Promise<void>
-    >('agent-workspace:terminalResize');
-    const closeHandler = getIpcHandler<(_listener: unknown, onDataId: number) => Promise<void>>(
-      'agent-workspace:terminalClose',
-    );
-
-    await terminalHandler({}, 'ws-1', 10);
-    await sendHandler({}, 10, 'hello');
-    await resizeHandler({}, 10, 120, 40);
-    await closeHandler({}, 10);
-
-    const nextMock = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(nextMock.session);
-    await terminalHandler({}, 'ws-1', 11);
-
-    expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('hello'));
-    expect(mock.session.resize).toHaveBeenCalledWith(120, 40);
-    expect(mock.session.close).toHaveBeenCalled();
-    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe('terminal agent command execution', () => {
+describe('agent session lifecycle', () => {
   const SDK_REFS_WITH_AGENT: {
     id: string;
     name: string;
@@ -2138,92 +2076,124 @@ describe('terminal agent command execution', () => {
     { id: 'ws-no-label', name: 'no-label-workspace', phase: 'ready', labels: {}, resourceVersion: '2' },
   ];
 
-  function createTerminalMockExecSession(): MockExecSession {
-    return createMockExecSession();
+  const testAgent = {
+    id: 'test-agent',
+    name: 'Test Agent',
+    description: '',
+    command: '/usr/bin/agent start',
+    destinationSkillsFolder: '~/.agent',
+  };
+
+  function getIpcHandler<T>(channel: string): T {
+    return vi.mocked(ipcHandle).mock.calls.find(call => call[0] === channel)![1] as unknown as T;
   }
 
   function getTerminalHandler(): (_listener: unknown, id: string, onDataId: number) => Promise<number> {
-    return vi.mocked(ipcHandle).mock.calls.find(call => call[0] === 'agent-workspace:terminal')![1] as (
-      _listener: unknown,
-      id: string,
-      onDataId: number,
-    ) => Promise<number>;
+    return getIpcHandler('agent-workspace:terminal');
   }
 
-  test('executes agent command on first terminal data', async () => {
-    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
-    vi.mocked(agentRegistry.getAgent).mockResolvedValue({
-      id: 'test-agent',
-      name: 'Test Agent',
-      description: '',
-      command: '/usr/bin/agent start',
-      destinationSkillsFolder: '~/.agent',
+  type NavigationDetails = { isMainFrame: boolean; isSameDocument: boolean };
+  const MAIN_FRAME_RELOAD: NavigationDetails = { isMainFrame: true, isSameDocument: false };
+
+  function getRendererNavigationListener(): (details: NavigationDetails) => void {
+    const listener = (
+      vi.mocked(webContents.on).mock.calls as unknown as [string, (details: NavigationDetails) => void][]
+    ).find(call => call[0] === 'did-start-navigation')?.[1];
+    expect(listener).toBeDefined();
+    return listener!;
+  }
+
+  describe('create', () => {
+    const mockAgent: Agent = {
+      id: 'claude',
+      name: 'Claude Code',
+      description: 'Test agent',
+      command: 'claude',
+      configurationFiles: [],
+      destinationSkillsFolder: '${HOME}/.claude/skills',
+      async preWorkspaceStart(): Promise<void> {},
+    };
+    const options: AgentWorkspaceCreateOptions = {
+      sourcePath: '/tmp/my-project',
+      agent: 'claude',
+      name: 'my-sandbox',
+      model: 'ramalama::granite-4.6::',
+      gateway: 'kaiden',
+    };
+
+    beforeEach(() => {
+      vi.mocked(agentRegistry.getAgentRegistration).mockReturnValue(mockAgent);
+      vi.mocked(readFile).mockRejectedValue(mockEnoent());
+      vi.mocked(sdkSandbox.waitReady).mockResolvedValue({ id: 'ws-created', name: 'my-sandbox' });
     });
-    const mock = createTerminalMockExecSession();
+
+    test('starts the agent without any terminal attached', async () => {
+      const mock = createMockExecSession();
+      sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+
+      await manager.create(options);
+      mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+
+      expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('my-sandbox', ['/bin/sh'], expect.anything());
+      await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('claude\n')));
+      expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', expect.anything(), '$ ');
+    });
+
+    test('succeeds even when the agent session cannot be started', async () => {
+      sdkSandbox.execInteractive.mockRejectedValue(new Error('exec failed'));
+
+      await expect(manager.create(options)).resolves.toEqual({ id: 'my-sandbox' });
+    });
+
+    test('terminal attaches to the running agent and replays its output', async () => {
+      const mock = createMockExecSession();
+      sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+      await manager.create(options);
+      mock.pushEvent({ stream: 'stdout', data: Buffer.from('agent ready') });
+      await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalled());
+
+      mockSdkListSandboxes([
+        { id: 'ws-created', name: 'my-sandbox', phase: 'ready', labels: {}, resourceVersion: '1' },
+      ]);
+      await getTerminalHandler()({}, 'ws-created', 10);
+
+      expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1);
+      expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 10, 'agent ready');
+      expect(mock.session.write).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('starts the agent when no session exists (e.g. after a restart)', async () => {
+    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+    const mock = createMockExecSession();
     sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
     mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
 
     await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n')));
+    expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 10, '$ ');
   });
 
-  test('does not execute agent command on subsequent connections', async () => {
+  test('executes agent command only once despite multiple data events', async () => {
     mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
-    vi.mocked(agentRegistry.getAgent).mockResolvedValue({
-      id: 'test-agent',
-      name: 'Test Agent',
-      description: '',
-      command: '/usr/bin/agent start',
-      destinationSkillsFolder: '~/.agent',
-    });
-    const mock1 = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(mock1.session);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
-    mock1.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
-    await vi.waitFor(() => expect(mock1.session.write).toHaveBeenCalled());
-
-    const mock2 = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(mock2.session);
-
-    await getTerminalHandler()({}, 'ws-agent', 11);
-    mock2.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+    await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalled());
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('more output') });
     await new Promise(r => setTimeout(r, 0));
 
-    expect(mock2.session.write).not.toHaveBeenCalled();
-  });
-
-  test('retries agent command when replaced before first terminal data', async () => {
-    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
-    vi.mocked(agentRegistry.getAgent).mockResolvedValue({
-      id: 'test-agent',
-      name: 'Test Agent',
-      description: '',
-      command: '/usr/bin/agent start',
-      destinationSkillsFolder: '~/.agent',
-    });
-    const mock1 = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(mock1.session);
-
-    await getTerminalHandler()({}, 'ws-agent', 10);
-
-    const mock2 = createTerminalMockExecSession();
-    sdkSandbox.execInteractive.mockResolvedValue(mock2.session);
-    await getTerminalHandler()({}, 'ws-agent', 11);
-
-    mock1.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
-    mock2.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
-
-    await vi.waitFor(() => {
-      expect(mock1.session.write).not.toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n'));
-      expect(mock2.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n'));
-    });
+    expect(mock.session.write).toHaveBeenCalledTimes(1);
   });
 
   test('does not execute command when workspace has no agent label', async () => {
     mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
-    const mock = createTerminalMockExecSession();
+    const mock = createMockExecSession();
     sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-no-label', 10);
@@ -2236,14 +2206,8 @@ describe('terminal agent command execution', () => {
 
   test('does not execute command when agent has no command', async () => {
     mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
-    vi.mocked(agentRegistry.getAgent).mockResolvedValue({
-      id: 'test-agent',
-      name: 'Test Agent',
-      description: '',
-      command: '',
-      destinationSkillsFolder: '~/.agent',
-    });
-    const mock = createTerminalMockExecSession();
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue({ ...testAgent, command: '' });
+    const mock = createMockExecSession();
     sdkSandbox.execInteractive.mockResolvedValue(mock.session);
 
     await getTerminalHandler()({}, 'ws-agent', 10);
@@ -2253,28 +2217,355 @@ describe('terminal agent command execution', () => {
     expect(mock.session.write).not.toHaveBeenCalled();
   });
 
-  test('executes agent command only once despite multiple data events', async () => {
-    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
-    vi.mocked(agentRegistry.getAgent).mockResolvedValue({
-      id: 'test-agent',
-      name: 'Test Agent',
-      description: '',
-      command: '/usr/bin/agent start',
-      destinationSkillsFolder: '~/.agent',
-    });
-    const mock = createTerminalMockExecSession();
+  test('close only detaches: the session keeps running and a new terminal reattaches to it', async () => {
+    mockSdkListSandboxes();
+    const mock = createMockExecSession();
     sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    const sendHandler =
+      getIpcHandler<(_listener: unknown, onDataId: number, content: string) => Promise<void>>(
+        'agent-workspace:terminalSend',
+      );
+    const resizeHandler = getIpcHandler<
+      (_listener: unknown, onDataId: number, width: number, height: number) => Promise<void>
+    >('agent-workspace:terminalResize');
+    const closeHandler = getIpcHandler<(_listener: unknown, onDataId: number) => Promise<void>>(
+      'agent-workspace:terminalClose',
+    );
 
-    await getTerminalHandler()({}, 'ws-agent', 10);
-    mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
-    await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalled());
-
-    mock.pushEvent({ stream: 'stdout', data: Buffer.from('more output') });
-    mock.pushEvent({ stream: 'stdout', data: Buffer.from('even more output') });
+    await getTerminalHandler()({}, 'ws-1', 10);
+    await sendHandler({}, 10, 'hello');
+    await resizeHandler({}, 10, 120, 40);
+    await closeHandler({}, 10);
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('while detached') });
     await new Promise(r => setTimeout(r, 0));
 
-    expect(mock.session.write).toHaveBeenCalledTimes(1);
-    expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n'));
+    expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('hello'));
+    expect(mock.session.resize).toHaveBeenCalledWith(120, 40);
+    expect(mock.session.close).not.toHaveBeenCalled();
+    expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', 10, 'while detached');
+
+    await getTerminalHandler()({}, 'ws-1', 11);
+
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1);
+    expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 11, 'while detached');
+  });
+
+  test('starts a new session once the previous one has ended', async () => {
+    mockSdkListSandboxes();
+    const first = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(first.session);
+    await getTerminalHandler()({}, 'ws-1', 10);
+
+    first.end();
+    await vi.waitFor(() => expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onEnd', 10));
+
+    const second = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(second.session);
+    await getTerminalHandler()({}, 'ws-1', 11);
+
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(2);
+  });
+
+  test('replays the current screen instead of the raw output', async () => {
+    mockSdkListSandboxes();
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    await getTerminalHandler()({}, 'ws-1', 10);
+    await getIpcHandler<(_listener: unknown, onDataId: number) => Promise<void>>('agent-workspace:terminalClose')(
+      {},
+      10,
+    );
+
+    // an escape sequence split across chunks, then a screen clear
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('old \x1b[3') });
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('1mred') });
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('\x1b[0m\x1b[2J\x1b[Hclean') });
+    await new Promise(r => setTimeout(r, 0));
+    await getTerminalHandler()({}, 'ws-1', 11);
+
+    const replay = vi
+      .mocked(webContents.send)
+      .mock.calls.find(call => call[0] === 'agent-workspace:terminal-onData' && call[1] === 11)?.[2] as string;
+    expect(replay).toContain('clean');
+    expect(replay).not.toContain('red');
+  });
+
+  test('deleting a sandbox by name closes its session', async () => {
+    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    await getTerminalHandler()({}, 'ws-agent', 10);
+
+    await manager.deleteOpenshellSandbox('agent-workspace', 'kaiden');
+
+    expect(mock.session.close).toHaveBeenCalled();
+  });
+
+  test('starts agents of ready workspaces when the gateway starts', async () => {
+    mockSdkListSandboxes([
+      ...SDK_REFS_WITH_AGENT,
+      {
+        id: 'ws-stopped',
+        name: 'stopped',
+        phase: 'stopped',
+        labels: { [AGENT_LABEL]: 'test-agent' },
+        resourceVersion: '3',
+      },
+    ]);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+
+    gatewayStartCallback!();
+    await vi.waitFor(() => expect(sdkSandbox.execInteractive).toHaveBeenCalled());
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
+
+    await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n')));
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1);
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('agent-workspace', ['/bin/sh'], expect.anything());
+
+    // a terminal opened meanwhile attaches to the same session
+    await getTerminalHandler()({}, 'ws-agent', 10);
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1);
+  });
+
+  test('concurrent starts of the same workspace share one session', async () => {
+    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+
+    await Promise.all([getTerminalHandler()({}, 'ws-agent', 10), getTerminalHandler()({}, 'ws-agent', 11)]);
+
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1);
+  });
+
+  test('attachAgentTerminal shares the session opened by the UI and only detaches', async () => {
+    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    await getTerminalHandler()({}, 'ws-agent', 10);
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('before attach') });
+    await new Promise(r => setTimeout(r, 0));
+
+    const onData = vi.fn();
+    const onEnd = vi.fn();
+    const terminal = await manager.attachAgentTerminal('agent-workspace', undefined, { onData, onEnd });
+    await vi.waitFor(() => expect(onData).toHaveBeenCalledWith(expect.stringContaining('before attach')));
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('live') });
+    await vi.waitFor(() => expect(onData).toHaveBeenLastCalledWith('live'));
+    terminal.write('hi');
+    terminal.detach();
+
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1);
+    expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('hi'));
+    expect(mock.session.close).not.toHaveBeenCalled();
+
+    mock.end();
+    await vi.waitFor(() => expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onEnd', 10));
+    expect(onEnd).not.toHaveBeenCalled();
+  });
+
+  test('attachAgentTerminal rejects an unknown workspace', async () => {
+    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
+
+    await expect(
+      manager.attachAgentTerminal('unknown', undefined, { onData: vi.fn(), onEnd: vi.fn() }),
+    ).rejects.toThrow('workspace "unknown" not found');
+  });
+
+  test('forwards output that arrives between attach and the snapshot, after the snapshot', async () => {
+    mockSdkListSandboxes();
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    await getTerminalHandler()({}, 'ws-1', 10);
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('before') });
+    await new Promise(r => setTimeout(r, 0));
+    await getIpcHandler<(_listener: unknown, onDataId: number) => Promise<void>>('agent-workspace:terminalClose')(
+      {},
+      10,
+    );
+    vi.mocked(webContents.send).mockClear();
+
+    // the snapshot is taken on a later tick: this chunk lands in the window between attach and snapshot
+    await getTerminalHandler()({}, 'ws-1', 11);
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('during') });
+    await new Promise(r => setTimeout(r, 0));
+
+    const sent = vi
+      .mocked(webContents.send)
+      .mock.calls.filter(call => call[0] === 'agent-workspace:terminal-onData' && call[1] === 11)
+      .map(call => call[2] as string);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain('before');
+    expect(sent[0]).not.toContain('during');
+    expect(sent[1]).toBe('during');
+  });
+
+  test('a stale renderer id is detached when the id is reused after a renderer reload', async () => {
+    mockSdkListSandboxes();
+    const first = createMockExecSession();
+    const second = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValueOnce(first.session).mockResolvedValueOnce(second.session);
+    const sendHandler =
+      getIpcHandler<(_listener: unknown, onDataId: number, content: string) => Promise<void>>(
+        'agent-workspace:terminalSend',
+      );
+
+    await getTerminalHandler()({}, 'ws-1', 3);
+    await getTerminalHandler()({}, 'ws-2', 3);
+    await sendHandler({}, 3, 'x');
+    first.pushEvent({ stream: 'stdout', data: Buffer.from('from ws-1') });
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(first.session.write).not.toHaveBeenCalled();
+    expect(second.session.write).toHaveBeenCalledWith(Buffer.from('x'));
+    expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', 3, 'from ws-1');
+  });
+
+  test('a renderer reload detaches every renderer terminal but keeps the agents running', async () => {
+    mockSdkListSandboxes();
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    await getTerminalHandler()({}, 'ws-1', 10);
+    const onLoading = getRendererNavigationListener();
+
+    onLoading(MAIN_FRAME_RELOAD);
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('after reload') });
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(mock.session.close).not.toHaveBeenCalled();
+    expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', 10, 'after reload');
+  });
+
+  test.each([
+    ['a subframe navigation', { isMainFrame: false, isSameDocument: false }],
+    ['an in-page navigation', { isMainFrame: true, isSameDocument: true }],
+  ] as const)('%s keeps renderer terminals attached', async (_label, details) => {
+    mockSdkListSandboxes();
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    await getTerminalHandler()({}, 'ws-1', 10);
+
+    getRendererNavigationListener()(details);
+    mock.pushEvent({ stream: 'stdout', data: Buffer.from('still here') });
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 10, 'still here');
+  });
+
+  test('attaching after the session ended does not hang and reports the end', async () => {
+    mockSdkListSandboxes();
+    const mock = createMockExecSession();
+    sdkSandbox.execInteractive.mockResolvedValue(mock.session);
+    // the session ends before the renderer can attach to it
+    sdkSandbox.execInteractive.mockImplementation(async () => {
+      queueMicrotask(() => mock.end());
+      return mock.session;
+    });
+
+    await expect(getTerminalHandler()({}, 'ws-1', 10)).rejects.toThrow('ended before it could be used');
+  });
+
+  test('disposes the headless screen when the shell exec fails', async () => {
+    mockSdkListSandboxes();
+    const disposeSpy = vi.spyOn(HeadlessTerminal.prototype, 'dispose');
+    sdkSandbox.execInteractive.mockRejectedValue(new Error('exec failed'));
+
+    await expect(getTerminalHandler()({}, 'ws-1', 10)).rejects.toThrow('exec failed');
+
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
+    disposeSpy.mockRestore();
+  });
+
+  test('a terminal request from a reloaded renderer does not replace the new renderer attachment', async () => {
+    mockSdkListSandboxes();
+    const first = createMockExecSession();
+    const second = createMockExecSession();
+    let resolveFirst: (session: ExecInteractiveSession) => void = () => {};
+    sdkSandbox.execInteractive
+      .mockImplementationOnce(() => new Promise<ExecInteractiveSession>(resolve => (resolveFirst = resolve)))
+      .mockResolvedValueOnce(second.session);
+    const onLoading = getRendererNavigationListener();
+    const sendHandler =
+      getIpcHandler<(_listener: unknown, onDataId: number, content: string) => Promise<void>>(
+        'agent-workspace:terminalSend',
+      );
+
+    // the old renderer asks for ws-1 with id 3, then reloads while the start is still pending
+    const stale = getTerminalHandler()({}, 'ws-1', 3);
+    await vi.waitFor(() => expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1));
+    onLoading(MAIN_FRAME_RELOAD);
+    // the new renderer reuses id 3 for ws-2
+    await getTerminalHandler()({}, 'ws-2', 3);
+    resolveFirst(first.session);
+    await stale;
+
+    await sendHandler({}, 3, 'x');
+    first.pushEvent({ stream: 'stdout', data: Buffer.from('from ws-1') });
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(second.session.write).toHaveBeenCalledWith(Buffer.from('x'));
+    expect(first.session.write).not.toHaveBeenCalled();
+    expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', 3, 'from ws-1');
+  });
+
+  test('disposing the manager cancels a pending agent start', async () => {
+    mockSdkListSandboxes();
+    const mock = createMockExecSession();
+    let resolveExec: (session: ExecInteractiveSession) => void = () => {};
+    sdkSandbox.execInteractive.mockImplementation(
+      () => new Promise<ExecInteractiveSession>(resolve => (resolveExec = resolve)),
+    );
+
+    const pending = getTerminalHandler()({}, 'ws-1', 10);
+    await vi.waitFor(() => expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1));
+    manager.dispose();
+    resolveExec(mock.session);
+
+    await expect(pending).rejects.toThrow('was cancelled');
+    expect(mock.session.close).toHaveBeenCalled();
+  });
+
+  test('deleting a workspace cancels a pending agent start', async () => {
+    mockSdkListSandboxes(SDK_REFS_WITH_AGENT);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+    const mock = createMockExecSession();
+    let resolveExec: (session: ExecInteractiveSession) => void = () => {};
+    sdkSandbox.execInteractive.mockImplementation(
+      () => new Promise<ExecInteractiveSession>(resolve => (resolveExec = resolve)),
+    );
+
+    const pending = getTerminalHandler()({}, 'ws-agent', 10);
+    await vi.waitFor(() => expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1));
+    await manager.deleteOpenshellSandbox('agent-workspace', 'kaiden');
+    resolveExec(mock.session);
+
+    await expect(pending).rejects.toThrow('was cancelled');
+    expect(mock.session.close).toHaveBeenCalled();
+  });
+
+  test('gateway start launches agents of all ready workspaces concurrently', async () => {
+    mockSdkListSandboxes([
+      ...SDK_REFS_WITH_AGENT,
+      {
+        id: 'ws-agent-2',
+        name: 'agent-workspace-2',
+        phase: 'ready',
+        labels: { [AGENT_LABEL]: 'test-agent' },
+        resourceVersion: '4',
+      },
+    ]);
+    vi.mocked(agentRegistry.getAgent).mockResolvedValue(testAgent);
+    const pendingExecs: Array<(session: ExecInteractiveSession) => void> = [];
+    sdkSandbox.execInteractive.mockImplementation(
+      () => new Promise<ExecInteractiveSession>(resolve => pendingExecs.push(resolve)),
+    );
+
+    gatewayStartCallback!();
+    await vi.waitFor(() => expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(2));
+
+    for (const resolve of pendingExecs) resolve(createMockExecSession().session);
   });
 });
 
