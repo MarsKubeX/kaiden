@@ -55,7 +55,6 @@ const config = {
         '@segment/analytics-node',
         'express',
         'isomorphic-ws',
-        'node-pty',
         '@xterm/headless',
         ...builtinModules.flatMap(p => [p, `node:${p}`]),
       ],
