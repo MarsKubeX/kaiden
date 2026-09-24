@@ -27,13 +27,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import type { CliToolRegistry } from '/@/plugin/cli-tool-registry.js';
 import type { Directories } from '/@/plugin/directories.js';
-import type { OpenshellCli } from '/@/plugin/openshell-cli/openshell-cli.js';
+import type { OpenshellGatewayManager } from '/@/plugin/openshell-cli/openshell-gateway-manager.js';
 import type { NotificationRegistry } from '/@/plugin/tasks/notification-registry.js';
 import type { Exec } from '/@/plugin/util/exec.js';
 import { isFreePort } from '/@/plugin/util/port.js';
 import { isLinux, isMac } from '/@/util.js';
 import type { CliToolInfo } from '/@api/cli-tool-info.js';
-import type { GatewayInfo } from '/@api/openshell-gateway-info.js';
+import type { ListedGateway } from '/@api/openshell-gateway-info.js';
 
 import { OpenshellGateway } from './openshell-gateway.js';
 
@@ -77,20 +77,29 @@ function mockExecResult(stdout = ''): RunResult {
   return { command: GATEWAY_BINARY, stdout, stderr: '' };
 }
 
+function listed(name: string, endpoint: string, overrides: Partial<ListedGateway['metadata']> = {}): ListedGateway {
+  return {
+    metadata: { name, gateway_endpoint: endpoint, is_remote: false, gateway_port: 0, ...overrides },
+    source: 'user',
+  };
+}
+
 let gateway: OpenshellGateway;
 
 const cliToolRegistry = {
   getCliToolInfos: vi.fn(),
 } as unknown as CliToolRegistry;
 
-const openshellCli = {
+const gatewayManager = {
   listGateways: vi.fn(),
-  selectGateway: vi.fn(),
-  checkEndpointStatus: vi.fn(),
+  getActiveGateway: vi.fn(),
+  setActiveGateway: vi.fn(),
+  health: vi.fn(),
   addGateway: vi.fn(),
   removeGateway: vi.fn(),
+  getGateway: vi.fn(),
   getGatewayInfo: vi.fn(),
-} as unknown as OpenshellCli;
+} as unknown as OpenshellGatewayManager;
 
 const directories = {
   getDataDirectory: vi.fn().mockReturnValue(KAIDEN_DATA_DIRECTORY),
@@ -118,12 +127,16 @@ beforeEach(() => {
   vi.mocked(unlink).mockResolvedValue();
   vi.mocked(exec.exec).mockResolvedValue({ command: '', stdout: '', stderr: '' });
   vi.mocked(isFreePort).mockResolvedValue(true);
-  vi.mocked(openshellCli.removeGateway).mockResolvedValue();
-  vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-  vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({ status: 'healthy', compute_drivers: [] });
+  vi.mocked(gatewayManager.removeGateway).mockResolvedValue();
+  vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+  vi.mocked(gatewayManager.getActiveGateway).mockResolvedValue(undefined);
+  vi.mocked(gatewayManager.getGatewayInfo).mockResolvedValue({ status: 'healthy', compute_drivers: [] });
+  vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+  vi.mocked(gatewayManager.addGateway).mockResolvedValue();
+  vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
   vi.mocked(rename).mockResolvedValue(undefined);
   vi.mocked(readFile).mockResolvedValue('');
-  gateway = new OpenshellGateway(cliToolRegistry, openshellCli, directories, exec, notificationRegistry);
+  gateway = new OpenshellGateway(cliToolRegistry, gatewayManager, directories, exec, notificationRegistry);
 });
 
 afterEach(() => {
@@ -150,7 +163,6 @@ describe.each(['default', 'created'])('%s gateway process environment', launch =
       { name: 'openshell-gateway', path: join(bundleDirectory, 'openshell-gateway') },
     ] as unknown as CliToolInfo[]);
     vi.mocked(spawn).mockReturnValue(createMockChildProcess());
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.116'));
 
     if (launch === 'default') {
@@ -176,7 +188,6 @@ describe.each(['default', 'created'])('%s gateway process environment', launch =
 
   test('should set XDG_STATE_HOME to gateway storage state directory', async () => {
     vi.mocked(spawn).mockReturnValue(createMockChildProcess());
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.116'));
 
     if (launch === 'default') {
@@ -200,10 +211,9 @@ describe.each(['default', 'created'])('%s gateway process environment', launch =
 
 describe('init', () => {
   test('does not inspect storage paths for invalid registered gateway names', async () => {
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: '../outside', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('../outside', 'http://127.0.0.1:17675')]);
+    vi.mocked(gatewayManager.getActiveGateway).mockResolvedValue('../outside');
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
 
     await gateway.init();
 
@@ -215,10 +225,10 @@ describe('init', () => {
     const proc = createMockChildProcess();
     vi.mocked(spawn).mockReturnValue(proc);
     vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('local-dev', 'http://127.0.0.1:17675')]);
+    vi.mocked(gatewayManager.health)
+      .mockRejectedValueOnce(new Error('not ready'))
+      .mockResolvedValue({ status: 'healthy', version: '1.0.0' });
 
     await gateway.init();
 
@@ -234,6 +244,802 @@ describe('init', () => {
     );
   });
 
+  test('skips auto-start when existing gateway is healthy and already active', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('local-gw', 'https://127.0.0.1:8443')]);
+    vi.mocked(gatewayManager.getActiveGateway).mockResolvedValue('local-gw');
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    await gateway.init();
+
+    expect(gatewayManager.listGateways).toHaveBeenCalled();
+    expect(gatewayManager.health).toHaveBeenCalledWith('local-gw');
+    expect(spawn).not.toHaveBeenCalled();
+    expect(createWriteStream).not.toHaveBeenCalled();
+    expect(gatewayManager.setActiveGateway).not.toHaveBeenCalled();
+  });
+
+  test('selects healthy gateway when it is not active', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('kaiden-alt', 'http://127.0.0.1:18080')]);
+    vi.mocked(gatewayManager.getActiveGateway).mockResolvedValue(undefined);
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    await gateway.init();
+
+    expect(gatewayManager.setActiveGateway).toHaveBeenCalledWith('kaiden-alt');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  test('prefers external gateway over kaiden-local on same port and removes kaiden-local', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([
+      listed('kaiden-local', 'http://127.0.0.1:17670'),
+      listed('openshell', 'http://127.0.0.1:17670'),
+    ]);
+    vi.mocked(gatewayManager.getActiveGateway).mockResolvedValue('kaiden-local');
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    await gateway.init();
+
+    expect(gatewayManager.setActiveGateway).toHaveBeenCalledWith('openshell');
+    expect(gatewayManager.removeGateway).toHaveBeenCalledWith('kaiden-local');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  test('auto-starts local gateway when no gateways exist and port is free', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    // The orphan check fails (health rejects), then auto-start health check succeeds
+    vi.mocked(gatewayManager.health)
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.init();
+
+    expect(writeFile).toHaveBeenCalledWith(
+      GATEWAY_CONFIG_PATH,
+      expect.stringContaining('compute_drivers = ["podman"]'),
+      'utf-8',
+    );
+    expect(spawn).toHaveBeenCalledWith(
+      GATEWAY_BINARY,
+      expect.arrayContaining(['--port', '17670']),
+      expect.objectContaining({ detached: false }),
+    );
+  });
+
+  test('reuses orphan gateway when port is already healthy', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    await gateway.init();
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(gatewayManager.addGateway).toHaveBeenCalledWith(
+      'kaiden-local',
+      expect.objectContaining({
+        name: 'kaiden-local',
+        gateway_endpoint: 'http://127.0.0.1:17670',
+        is_remote: false,
+      }),
+    );
+  });
+
+  test('skips auto-start when discovery fails and binary is not registered', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockRejectedValue(new Error('config dir not found'));
+    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
+
+    await gateway.init();
+
+    expect(spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe('createLocalGateway', () => {
+  test('starts and registers a named plaintext gateway on loopback', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.createLocalGateway({
+      name: 'local-dev',
+      bindAddress: '127.0.0.1',
+      port: 17675,
+      driver: 'podman',
+    });
+
+    const storageDirectory = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'local-dev');
+    expect(writeFile).toHaveBeenCalledWith(
+      join(storageDirectory, 'gateway.toml'),
+      expect.stringContaining('enable_bind_mounts = true'),
+      'utf-8',
+    );
+    expect(spawn).toHaveBeenCalledWith(
+      GATEWAY_BINARY,
+      expect.arrayContaining([
+        '--port',
+        '17675',
+        '--bind-address',
+        '127.0.0.1',
+        '--config',
+        join(storageDirectory, 'gateway.toml'),
+        '--db-url',
+        `sqlite:${join(storageDirectory, 'gateway.db')}?mode=rwc`,
+        '--disable-tls',
+      ]),
+      expect.objectContaining({
+        detached: false,
+        stdio: ['ignore', 42, 42],
+      }),
+    );
+    expect(gatewayManager.addGateway).toHaveBeenCalledWith(
+      'local-dev',
+      expect.objectContaining({
+        name: 'local-dev',
+        gateway_endpoint: 'http://127.0.0.1:17675',
+        is_remote: false,
+        gateway_port: 17675,
+      }),
+    );
+  });
+
+  test('cleans up the process and registration when startup fails', async () => {
+    const proc = createMockChildProcess();
+    Object.defineProperty(proc, 'exitCode', { get: () => 1 });
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await expect(
+      gateway.createLocalGateway({
+        name: 'local-dev',
+        bindAddress: '127.0.0.1',
+        port: 17675,
+        driver: 'podman',
+      }),
+    ).rejects.toThrow('Gateway process exited before becoming ready');
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(gatewayManager.removeGateway).toHaveBeenCalledWith('local-dev');
+  });
+});
+
+describe('getGatewayBinaryPath', () => {
+  test('returns path from CLI tool registry', () => {
+    expect(gateway.getGatewayBinaryPath()).toBe(GATEWAY_BINARY);
+  });
+
+  test('returns undefined when openshell-gateway is not registered', () => {
+    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
+    expect(gateway.getGatewayBinaryPath()).toBeUndefined();
+  });
+});
+
+describe('start', () => {
+  test('spawns the gateway process and writes its output only to the log', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+    expect(spawn).toHaveBeenCalledWith(
+      GATEWAY_BINARY,
+      [
+        '--config',
+        GATEWAY_CONFIG_PATH,
+        '--port',
+        '17670',
+        '--bind-address',
+        '127.0.0.1',
+        '--disable-tls',
+        '--db-url',
+        GATEWAY_DB_URL,
+      ],
+      expect.objectContaining({ detached: false }),
+    );
+    expect(createWriteStream).toHaveBeenCalledWith(GATEWAY_LOG_PATH, { flags: 'w' });
+    expect(gatewayLogStream.write).not.toHaveBeenCalled();
+
+    consoleLog.mockClear();
+    consoleError.mockClear();
+    const stdout = Buffer.from('routine gateway output\n');
+    const stderr = Buffer.from('routine gateway diagnostic\n');
+    proc._stdout.emit('data', stdout);
+    proc._stderr.emit('data', stderr);
+
+    expect(gatewayLogStream.write).toHaveBeenNthCalledWith(1, stdout);
+    expect(gatewayLogStream.write).toHaveBeenNthCalledWith(2, stderr);
+    expect(consoleLog).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  test('registers gateway via gatewayManager before waiting for health', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+
+    expect(gatewayManager.addGateway).toHaveBeenCalledWith(
+      'kaiden-local',
+      expect.objectContaining({
+        name: 'kaiden-local',
+        gateway_endpoint: 'http://127.0.0.1:17670',
+        is_remote: false,
+      }),
+    );
+  });
+
+  test('skips registerGateway when skipRegistration is true', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start({ skipRegistration: true });
+
+    expect(spawn).toHaveBeenCalled();
+    expect(gatewayManager.addGateway).not.toHaveBeenCalled();
+  });
+
+  test('skips if already running', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+    await gateway.start();
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  test('throws when gateway binary is not registered', async () => {
+    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
+
+    await expect(gateway.start()).rejects.toThrow('openshell-gateway binary not registered');
+  });
+
+  test('performs health check via gatewayManager', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+
+    expect(gatewayManager.health).toHaveBeenCalledWith('kaiden-local');
+  });
+});
+
+describe('stop', () => {
+  test('sends SIGTERM to running process', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+
+    const stopPromise = gateway.stop();
+    proc.emit('exit', 0, undefined);
+    await stopPromise;
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  test('is a no-op when not running', async () => {
+    await gateway.stop();
+  });
+});
+
+describe('isRunning', () => {
+  test('returns false when no process is spawned', () => {
+    expect(gateway.isRunning()).toBe(false);
+  });
+
+  test('returns true when process is running', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+
+    expect(gateway.isRunning()).toBe(true);
+  });
+});
+
+describe('dispose', () => {
+  test('stops the gateway process and closes its log', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+
+    gateway.dispose();
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    proc.emit('exit', 0, undefined);
+    await vi.waitFor(() => expect(gatewayLogStream.end).toHaveBeenCalledOnce());
+  });
+});
+
+describe('supportsMounts', () => {
+  beforeEach(async () => {
+    vi.mocked(spawn).mockReturnValue(createMockChildProcess());
+    await gateway.start();
+  });
+
+  test('queries runtime info for a discovered gateway instead of reading local config', async () => {
+    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true');
+    vi.mocked(gatewayManager.getGatewayInfo).mockResolvedValue({
+      status: 'healthy',
+      compute_drivers: [{ name: 'podman', capabilities: { driver_name: 'podman' } }],
+    });
+    await expect(
+      gateway.supportsMounts({
+        name: 'discovered',
+        endpoint: 'http://127.0.0.1:17671',
+        type: 'local',
+        driver: 'podman',
+      }),
+    ).resolves.toBe(true);
+    expect(readFile).not.toHaveBeenCalled();
+    expect(gatewayManager.getGatewayInfo).toHaveBeenCalledWith('discovered');
+  });
+
+  test('returns true when the managed gateway config enables bind mounts', async () => {
+    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true\n');
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'kaiden-local',
+        endpoint: 'http://127.0.0.1:17670',
+        type: 'local',
+        driver: 'podman',
+      }),
+    ).resolves.toBe(true);
+    expect(readFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, 'utf-8');
+  });
+
+  test('returns false for gateways without a managed bind-mount config', async () => {
+    vi.mocked(readFile).mockRejectedValue(new Error('ENOENT'));
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'kaiden-local',
+        endpoint: 'http://127.0.0.1:17670',
+        type: 'local',
+        driver: 'podman',
+      }),
+    ).resolves.toBe(false);
+  });
+
+  test('falls back to runtime check when the managed gateway exits', async () => {
+    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true\n');
+    const info = {
+      name: 'kaiden-local',
+      endpoint: 'http://127.0.0.1:17670',
+      type: 'local' as const,
+      driver: 'podman' as const,
+    };
+    await expect(gateway.supportsMounts(info)).resolves.toBe(true);
+
+    vi.mocked(spawn).mock.results[0]?.value.emit('exit', 0);
+    vi.mocked(gatewayManager.getGatewayInfo).mockRejectedValue(new Error('gateway unreachable'));
+
+    await expect(gateway.supportsMounts(info)).resolves.toBe(false);
+  });
+
+  test.each([
+    { type: 'remote' as const, endpoint: 'https://gateway.example.com', is_remote: true },
+    { type: 'local' as const, endpoint: 'http://10.0.0.5:17670' },
+  ])('returns false for $type registration at $endpoint despite managed storage', async registration => {
+    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true\n');
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'kaiden-local',
+        ...registration,
+        driver: 'podman',
+      }),
+    ).resolves.toBe(false);
+    expect(readFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('supportsMounts (non-managed gateways)', () => {
+  test.each([
+    'podman',
+    'docker',
+  ] as const)('returns true for a non-managed local gateway with %s driver', async driverName => {
+    vi.mocked(gatewayManager.getGatewayInfo).mockResolvedValue({
+      status: 'healthy',
+      compute_drivers: [{ name: driverName, capabilities: { driver_name: driverName } }],
+    });
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'external-gw',
+        endpoint: 'http://127.0.0.1:17671',
+        type: 'local',
+        driver: driverName,
+      }),
+    ).resolves.toBe(true);
+    expect(gatewayManager.getGatewayInfo).toHaveBeenCalledWith('external-gw');
+  });
+
+  test('returns false for a non-managed local gateway with vm driver', async () => {
+    vi.mocked(gatewayManager.getGatewayInfo).mockResolvedValue({
+      status: 'healthy',
+      compute_drivers: [{ name: 'vm', capabilities: { driver_name: 'vm' } }],
+    });
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'external-gw',
+        endpoint: 'http://127.0.0.1:17671',
+        type: 'local',
+        driver: 'vm',
+      }),
+    ).resolves.toBe(false);
+  });
+
+  test('returns false when getGatewayInfo fails for a non-managed gateway', async () => {
+    vi.mocked(gatewayManager.getGatewayInfo).mockRejectedValue(new Error('connection refused'));
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'external-gw',
+        endpoint: 'http://127.0.0.1:17671',
+        type: 'local',
+        driver: 'podman',
+      }),
+    ).resolves.toBe(false);
+  });
+
+  test('returns false when the non-managed gateway has no compute drivers', async () => {
+    vi.mocked(gatewayManager.getGatewayInfo).mockResolvedValue({
+      status: 'healthy',
+      compute_drivers: [],
+    });
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'external-gw',
+        endpoint: 'http://127.0.0.1:17671',
+        type: 'local',
+        driver: 'podman',
+      }),
+    ).resolves.toBe(false);
+  });
+
+  test('returns false for a non-managed remote gateway with podman driver', async () => {
+    await expect(
+      gateway.supportsMounts({
+        name: 'remote-gw',
+        endpoint: 'https://gateway.example.com',
+        type: 'local',
+        is_remote: true,
+        driver: 'podman',
+      }),
+    ).resolves.toBe(false);
+    expect(gatewayManager.getGatewayInfo).not.toHaveBeenCalled();
+  });
+
+  test('returns false for a non-managed gateway on a non-local endpoint', async () => {
+    await expect(
+      gateway.supportsMounts({
+        name: 'external-gw',
+        endpoint: 'http://10.0.0.5:17671',
+        type: 'local',
+        driver: 'podman',
+      }),
+    ).resolves.toBe(false);
+    expect(gatewayManager.getGatewayInfo).not.toHaveBeenCalled();
+  });
+
+  test('returns true for a non-managed gateway bound to IPv6 loopback [::1]', async () => {
+    vi.mocked(gatewayManager.getGatewayInfo).mockResolvedValue({
+      status: 'healthy',
+      compute_drivers: [{ name: 'podman', capabilities: { driver_name: 'podman' } }],
+    });
+
+    await expect(
+      gateway.supportsMounts({
+        name: 'ipv6-gw',
+        endpoint: 'http://[::1]:17671',
+        type: 'local',
+        driver: 'podman',
+      }),
+    ).resolves.toBe(true);
+    expect(gatewayManager.getGatewayInfo).toHaveBeenCalledWith('ipv6-gw');
+  });
+});
+
+describe('onDidGatewayStart', () => {
+  test('fires when existing gateway is healthy and active', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('local-gw', 'https://127.0.0.1:8443')]);
+    vi.mocked(gatewayManager.getActiveGateway).mockResolvedValue('local-gw');
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    const listener = vi.fn();
+    gateway.onDidGatewayStart(listener);
+    await gateway.init();
+
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  test('fires when existing gateway is healthy but not active', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('kaiden-alt', 'http://127.0.0.1:18080')]);
+    vi.mocked(gatewayManager.getActiveGateway).mockResolvedValue(undefined);
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    const listener = vi.fn();
+    gateway.onDidGatewayStart(listener);
+    await gateway.init();
+
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  test('fires when orphan gateway found on default port', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(gatewayManager.health).mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    const listener = vi.fn();
+    gateway.onDidGatewayStart(listener);
+    await gateway.init();
+
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  test('fires when auto-start succeeds', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(gatewayManager.health)
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    const listener = vi.fn();
+    gateway.onDidGatewayStart(listener);
+    await gateway.init();
+
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  test('does not fire when no binary and no gateways', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockRejectedValue(new Error('config dir not found'));
+    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
+
+    const listener = vi.fn();
+    gateway.onDidGatewayStart(listener);
+    await gateway.init();
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+describe('onDidGatewayInitFailed', () => {
+  test('fires with error message when auto-start fails because process exits', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(gatewayManager.health).mockRejectedValue(new Error('connection refused'));
+
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockImplementation(() => {
+      setTimeout(() => {
+        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
+        proc.emit('exit', 1, undefined);
+      }, 0);
+      return proc;
+    });
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    const failListener = vi.fn();
+    const startListener = vi.fn();
+    gateway.onDidGatewayInitFailed(failListener);
+    gateway.onDidGatewayStart(startListener);
+
+    await gateway.init();
+
+    expect(failListener).toHaveBeenCalledOnce();
+    expect(failListener).toHaveBeenCalledWith(expect.stringContaining('Gateway process exited before becoming ready'));
+    expect(startListener).not.toHaveBeenCalled();
+  });
+
+  test('creates error notification when auto-start fails', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(gatewayManager.health).mockRejectedValue(new Error('connection refused'));
+
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockImplementation(() => {
+      setTimeout(() => {
+        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
+        proc.emit('exit', 1, undefined);
+      }, 0);
+      return proc;
+    });
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.init();
+
+    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'OpenShell Gateway failed to start',
+        type: 'error',
+        extensionId: 'core',
+      }),
+    );
+  });
+
+  test('includes stderr output in notification body', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(gatewayManager.health).mockRejectedValue(new Error('connection refused'));
+
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockImplementation(() => {
+      setTimeout(() => {
+        proc._stderr.emit('data', Buffer.from('Socket not found: /var/run/docker.sock'));
+        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
+        proc.emit('exit', 1, undefined);
+      }, 0);
+      return proc;
+    });
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.init();
+
+    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.stringContaining('Socket not found: /var/run/docker.sock'),
+      }),
+    );
+  });
+
+  test('does not fire on successful init', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([]);
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockReturnValue(proc);
+    vi.mocked(gatewayManager.getGateway).mockRejectedValue(new Error('not found'));
+    vi.mocked(gatewayManager.health)
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    const failListener = vi.fn();
+    gateway.onDidGatewayInitFailed(failListener);
+    await gateway.init();
+
+    expect(failListener).not.toHaveBeenCalled();
+    expect(notificationRegistry.addNotification).not.toHaveBeenCalled();
+  });
+});
+
+describe('migration backup in start()', () => {
+  test('backs up database, notifies, and retries once when migration error occurs', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const failProc = createMockChildProcess();
+    const retryProc = createMockChildProcess();
+
+    vi.mocked(spawn)
+      .mockImplementationOnce(() => {
+        setTimeout(() => {
+          failProc._stderr.emit(
+            'data',
+            Buffer.from(
+              'migration error: migration 7 was previously applied but is missing in the resolved migrations',
+            ),
+          );
+          Object.defineProperty(failProc, 'exitCode', { value: 1, configurable: true });
+          failProc.emit('exit', 1, undefined);
+        }, 0);
+        return failProc;
+      })
+      .mockReturnValueOnce(retryProc);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+    vi.mocked(gatewayManager.health)
+      .mockRejectedValueOnce(new Error('not ready'))
+      .mockResolvedValue({ status: 'healthy', version: '1.0.0' });
+
+    await gateway.start();
+
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(rename).toHaveBeenCalledWith(
+      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db'),
+      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db.backup'),
+    );
+    expect(rename).toHaveBeenCalledWith(
+      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-wal'),
+      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-wal.backup'),
+    );
+    expect(rename).toHaveBeenCalledWith(
+      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-shm'),
+      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-shm.backup'),
+    );
+    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'OpenShell Gateway database migration error',
+        body: expect.stringContaining('kaiden-local'),
+        type: 'warn',
+        extensionId: 'core',
+      }),
+    );
+    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.stringContaining(join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db.backup')),
+      }),
+    );
+  });
+
+  test('does not back up database on non-migration errors', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const proc = createMockChildProcess();
+    vi.mocked(spawn).mockImplementation(() => {
+      setTimeout(() => {
+        proc._stderr.emit('data', Buffer.from('Socket not found: /var/run/docker.sock'));
+        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
+        proc.emit('exit', 1, undefined);
+      }, 0);
+      return proc;
+    });
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+    vi.mocked(gatewayManager.health).mockRejectedValue(new Error('not ready'));
+
+    await expect(gateway.start()).rejects.toThrow('Gateway process exited before becoming ready');
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(rename).not.toHaveBeenCalled();
+    expect(notificationRegistry.addNotification).not.toHaveBeenCalled();
+  });
+});
+
+describe('migration backup in startCreatedGateway via init()', () => {
   test('backs up database, notifies, and retries once when created gateway fails with migration error', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -242,20 +1048,18 @@ describe('init', () => {
     const retryProc = createMockChildProcess();
     vi.mocked(spawn).mockReturnValueOnce(failProc).mockReturnValueOnce(retryProc);
     vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    // First: startCreatedGateway health check (false → triggers spawn)
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('local-dev', 'http://127.0.0.1:17675')]);
+    // First: startCreatedGateway health check (rejects → triggers spawn)
     // After: init's health loop finds gateway healthy so it returns early
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
+    vi.mocked(gatewayManager.health)
+      .mockRejectedValueOnce(new Error('not ready'))
+      .mockResolvedValue({ status: 'healthy', version: '1.0.0' });
 
     // First spawn exits immediately (migration error in log file)
     Object.defineProperty(failProc, 'exitCode', { value: 1, configurable: true });
-    vi.mocked(readFile)
-      .mockResolvedValueOnce('')
-      .mockResolvedValueOnce(
-        'migration error: migration 7 was previously applied but is missing in the resolved migrations',
-      );
+    vi.mocked(readFile).mockResolvedValueOnce(
+      'migration error: migration 7 was previously applied but is missing in the resolved migrations',
+    );
 
     // init() → startCreatedGateway detects migration error, backs up, notifies,
     // then retries once; the retry (retryProc) succeeds via getGatewayInfo
@@ -299,12 +1103,12 @@ describe('init', () => {
     Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
     vi.mocked(spawn).mockReturnValue(proc);
     vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    // First: startCreatedGateway health check (false → triggers spawn which fails)
+    vi.mocked(gatewayManager.listGateways).mockResolvedValue([listed('local-dev', 'http://127.0.0.1:17675')]);
+    // First: startCreatedGateway health check (rejects → triggers spawn which fails)
     // After: init's health loop finds gateway healthy so it returns early
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
+    vi.mocked(gatewayManager.health)
+      .mockRejectedValueOnce(new Error('not ready'))
+      .mockResolvedValue({ status: 'healthy', version: '1.0.0' });
     vi.mocked(readFile).mockResolvedValueOnce('some other error');
 
     // init() catches startCreatedGateway errors and warns instead of throwing
@@ -313,686 +1117,53 @@ describe('init', () => {
     // rename should not have been called since the error is not a migration error
     expect(rename).not.toHaveBeenCalled();
   });
-
-  test('skips auto-start when existing gateway is healthy and already active', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const existingGateways: GatewayInfo[] = [
-      { name: 'local-gw', endpoint: 'https://127.0.0.1:8443', active: true, type: 'local' },
-    ];
-    vi.mocked(openshellCli.listGateways).mockResolvedValue(existingGateways);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(openshellCli.listGateways).toHaveBeenCalled();
-    expect(openshellCli.checkEndpointStatus).toHaveBeenCalledWith('https://127.0.0.1:8443');
-    expect(spawn).not.toHaveBeenCalled();
-    expect(createWriteStream).not.toHaveBeenCalled();
-    expect(openshellCli.selectGateway).not.toHaveBeenCalled();
-  });
-
-  test('selects healthy gateway when it is not active', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const existingGateways: GatewayInfo[] = [{ name: 'kaiden-alt', endpoint: 'http://127.0.0.1:18080', active: false }];
-    vi.mocked(openshellCli.listGateways).mockResolvedValue(existingGateways);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(openshellCli.selectGateway).toHaveBeenCalledWith('kaiden-alt');
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  test('treats gateway with 0.0.0.0 endpoint as local', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'openshell', endpoint: 'http://0.0.0.0:17670', active: false } as GatewayInfo,
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(openshellCli.selectGateway).toHaveBeenCalledWith('openshell');
-    expect(spawn).not.toHaveBeenCalled();
-    expect(openshellCli.addGateway).not.toHaveBeenCalled();
-  });
-
-  test('prefers external gateway over kaiden-local on same port and removes kaiden-local', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'kaiden-local', endpoint: 'http://127.0.0.1:17670', active: true, type: 'local' } as GatewayInfo,
-      { name: 'openshell', endpoint: 'http://127.0.0.1:17670', active: false, type: 'local' } as GatewayInfo,
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(openshellCli.selectGateway).toHaveBeenCalledWith('openshell');
-    expect(openshellCli.removeGateway).toHaveBeenCalledWith('kaiden-local');
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  test('prioritizes same-port gateway over different-port gateway when both exist with kaiden-local', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'kaiden-local', endpoint: 'http://127.0.0.1:17670', active: true, type: 'local' } as GatewayInfo,
-      { name: 'other', endpoint: 'http://127.0.0.1:18000', active: false, type: 'local' } as GatewayInfo,
-      { name: 'openshell', endpoint: 'http://0.0.0.0:17670', active: false, type: 'local' } as GatewayInfo,
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(openshellCli.selectGateway).toHaveBeenCalledWith('openshell');
-    expect(openshellCli.removeGateway).toHaveBeenCalledWith('kaiden-local');
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  test('keeps kaiden-local when external gateway runs on a different port', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'kaiden-local', endpoint: 'http://127.0.0.1:17670', active: true, type: 'local' } as GatewayInfo,
-      { name: 'other', endpoint: 'http://127.0.0.1:18000', active: false, type: 'local' } as GatewayInfo,
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(openshellCli.selectGateway).not.toHaveBeenCalled();
-    expect(openshellCli.removeGateway).not.toHaveBeenCalled();
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  test('auto-starts local gateway when no gateways exist and port is free', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.init();
-
-    expect(writeFile).toHaveBeenCalledWith(
-      GATEWAY_CONFIG_PATH,
-      expect.stringContaining('compute_drivers = ["podman"]'),
-      'utf-8',
-    );
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      expect.arrayContaining(['--port', '17670']),
-      expect.objectContaining({ detached: false }),
-    );
-  });
-
-  test('reuses orphan gateway when port is already healthy', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(spawn).not.toHaveBeenCalled();
-    expect(openshellCli.addGateway).toHaveBeenCalledWith({
-      endpoint: 'http://127.0.0.1:17670',
-      local: true,
-      name: 'kaiden-local',
-    });
-  });
-
-  test('skips auto-start when discovery fails and binary is not registered', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockRejectedValue(new Error('CLI not found'));
-    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
-
-    await gateway.init();
-
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  test('auto-starts when discovery fails but binary is available and port is free', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways)
-      .mockRejectedValueOnce(new Error('no gateway configured'))
-      .mockResolvedValue([]);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.init();
-
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      expect.arrayContaining(['--port', '17670']),
-      expect.objectContaining({ detached: false }),
-    );
-  });
-
-  test('returns without spawning when at least one gateway is healthy among multiple', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const gateways: GatewayInfo[] = [
-      { name: 'gw-stopped', endpoint: 'http://127.0.0.1:8080', active: false },
-      { name: 'gw-healthy', endpoint: 'http://127.0.0.1:9090', active: true },
-    ];
-    vi.mocked(openshellCli.listGateways).mockResolvedValue(gateways);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-
-    await gateway.init();
-
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  test('creates new gateway when existing gateways are unreachable', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const gateways: GatewayInfo[] = [{ name: 'broken-gw', endpoint: 'http://127.0.0.1:19999', active: true }];
-    vi.mocked(openshellCli.listGateways).mockResolvedValue(gateways);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValue(true);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.init();
-
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      expect.arrayContaining(['--port', '17670']),
-      expect.objectContaining({ detached: false }),
-    );
-  });
-
-  test('delegates health check to openshellCli for https endpoints', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const gateways: GatewayInfo[] = [
-      { name: 'tls-gw', endpoint: 'https://127.0.0.1:8443', active: true, type: 'local' },
-    ];
-    vi.mocked(openshellCli.listGateways).mockResolvedValue(gateways);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.init();
-
-    expect(openshellCli.checkEndpointStatus).toHaveBeenCalledWith('https://127.0.0.1:8443');
-  });
-
-  test('skips remote gateways during init and auto-starts local', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const gateways: GatewayInfo[] = [{ name: 'remote-gw', endpoint: 'https://gw.example.com', active: true }];
-    vi.mocked(openshellCli.listGateways).mockResolvedValue(gateways);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.init();
-
-    expect(openshellCli.checkEndpointStatus).not.toHaveBeenCalledWith('https://gw.example.com');
-    expect(spawn).toHaveBeenCalled();
-  });
 });
 
-describe('createLocalGateway', () => {
-  test('starts and registers a named plaintext gateway on loopback', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.createLocalGateway({
-      name: 'local-dev',
-      bindAddress: '127.0.0.1',
-      port: 17675,
-      driver: 'podman',
-    });
-
-    const storageDirectory = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'local-dev');
-    expect(writeFile).toHaveBeenCalledWith(
-      join(storageDirectory, 'gateway.toml'),
-      expect.stringContaining('enable_bind_mounts = true'),
-      'utf-8',
-    );
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      expect.arrayContaining([
-        '--port',
-        '17675',
-        '--bind-address',
-        '127.0.0.1',
-        '--config',
-        join(storageDirectory, 'gateway.toml'),
-        '--db-url',
-        `sqlite:${join(storageDirectory, 'gateway.db')}?mode=rwc`,
-        '--disable-tls',
-      ]),
-      expect.objectContaining({
-        detached: false,
-        stdio: ['ignore', 42, 42],
-      }),
-    );
-    const spawnArgs = vi.mocked(spawn).mock.calls[0]?.[1] ?? [];
-    expect(spawnArgs).not.toContain('--tls-cert');
-    expect(spawnArgs).not.toContain('--tls-key');
-    expect(spawnArgs).not.toContain('--tls-client-ca');
-    expect(openshellCli.addGateway).toHaveBeenCalledWith({
-      endpoint: 'http://127.0.0.1:17675',
-      local: true,
-      name: 'local-dev',
-    });
-    expect(exec.exec).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      expect.arrayContaining(['generate-certs', '--output-dir', storageDirectory]),
-      { env: { XDG_CONFIG_HOME: join(storageDirectory, 'xdg-config') } },
-    );
-    expect(closeLogFile).toHaveBeenCalled();
-  });
-
-  test('defaults to Podman even when the active gateway uses Docker', async () => {
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({
-      status: 'healthy',
-      compute_drivers: [{ name: 'docker', capabilities: { driver_name: 'docker' } }],
-    });
-
-    await gateway.createLocalGateway({
-      name: 'podman-default',
-      bindAddress: '127.0.0.1',
-      port: 17675,
-    });
-
-    expect(writeFile).toHaveBeenCalledWith(
-      join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'podman-default', 'gateway.toml'),
-      expect.stringContaining('compute_drivers = ["podman"]'),
-      'utf-8',
-    );
-  });
-
-  test('creates a local gateway using the VM driver', async () => {
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.createLocalGateway({
-      name: 'vm-dev',
-      bindAddress: '127.0.0.1',
-      port: 17675,
-      driver: 'vm',
-    });
-
-    const configPath = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'vm-dev', 'gateway.toml');
-    expect(writeFile).toHaveBeenCalledWith(configPath, expect.stringContaining('compute_drivers = ["vm"]'), 'utf-8');
-    const config = vi.mocked(writeFile).mock.calls.find(([path]) => path === configPath)?.[1] as string;
-    expect(config).toContain('[openshell.drivers.vm]');
-    expect(config).not.toContain('enable_bind_mounts');
-    expect(config).not.toContain('supervisor_image');
-  });
-
-  test.each([
-    ['../gateway', '127.0.0.1', 17675, 'Gateway name'],
-    ['kaiden-local', '127.0.0.1', 17675, 'reserved'],
-    ['local-dev', '0.0.0.0', 17675, 'must bind to 127.0.0.1'],
-    ['local-dev', '127.0.0.1', 1023, 'between 1024 and 65535'],
-  ])('rejects invalid local gateway input (%s, %s:%i): %s', async (name, bindAddress, port, message) => {
-    await expect(gateway.createLocalGateway({ name, bindAddress, port, driver: 'podman' })).rejects.toThrow(message);
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  test('rejects a port occupied by an unregistered process before creating files', async () => {
-    vi.mocked(isFreePort).mockRejectedValue(new Error('Port 17675 is already in use.'));
-
-    await expect(
-      gateway.createLocalGateway({
-        name: 'local-dev',
-        bindAddress: '127.0.0.1',
-        port: 17675,
-        driver: 'podman',
-      }),
-    ).rejects.toThrow('Port 17675 is already in use');
-
-    expect(writeFile).not.toHaveBeenCalled();
-    expect(spawn).not.toHaveBeenCalled();
-    expect(openshellCli.addGateway).not.toHaveBeenCalled();
-  });
-
-  test('cleans up the process and registration when startup fails', async () => {
-    const proc = createMockChildProcess();
-    Object.defineProperty(proc, 'exitCode', { get: () => 1 });
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await expect(
-      gateway.createLocalGateway({
-        name: 'local-dev',
-        bindAddress: '127.0.0.1',
-        port: 17675,
-        driver: 'podman',
-      }),
-    ).rejects.toThrow('Gateway process exited before becoming ready');
-
-    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
-    expect(openshellCli.removeGateway).toHaveBeenCalledWith('local-dev');
-  });
-
-  test('force-stops a failed gateway process that ignores SIGTERM', async () => {
+describe('registration-before-health failure path', () => {
+  test('cleans up gateway and restores port when registerGateway succeeds but waitForReady times out', async () => {
     vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const proc = createMockChildProcess();
     vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.getGatewayInfo).mockRejectedValue(new Error('not ready'));
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+    // health always fails so waitForReady times out
+    vi.mocked(gatewayManager.health).mockRejectedValue(new Error('connection refused'));
 
-    const creation = expect(
-      gateway.createLocalGateway({
-        name: 'local-dev',
-        bindAddress: '127.0.0.1',
-        port: 17675,
-        driver: 'podman',
-      }),
-    ).rejects.toThrow('Gateway did not become ready');
-    await vi.advanceTimersByTimeAsync(30_000);
-    await vi.advanceTimersByTimeAsync(5_000);
+    let caughtError: unknown;
+    const startPromise = gateway.start({ port: 9999, bindAddress: '127.0.0.1' }).catch((err: unknown) => {
+      caughtError = err;
+    });
 
-    await creation;
-    expect(proc.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
-    expect(proc.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+
+    proc.emit('exit', 1, undefined);
+    await vi.advanceTimersByTimeAsync(5000);
+    await startPromise;
+
+    expect(caughtError).toBeInstanceOf(Error);
+    expect((caughtError as Error).message).toContain('Gateway did not become ready');
+    // registerGateway was called (succeeds by default mock)
+    expect(gatewayManager.addGateway).toHaveBeenCalled();
+    // Process was stopped
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
     vi.useRealTimers();
   });
-
-  test('closes the log without registering when spawn throws', async () => {
-    vi.mocked(spawn).mockImplementation(() => {
-      throw new Error('spawn failed');
-    });
-
-    await expect(
-      gateway.createLocalGateway({
-        name: 'local-dev',
-        bindAddress: '127.0.0.1',
-        port: 17675,
-        driver: 'podman',
-      }),
-    ).rejects.toThrow('spawn failed');
-
-    expect(closeLogFile).toHaveBeenCalledOnce();
-    expect(openshellCli.addGateway).not.toHaveBeenCalled();
-    expect(openshellCli.removeGateway).not.toHaveBeenCalled();
-  });
 });
 
-describe('getGatewayBinaryPath', () => {
-  test('returns path from CLI tool registry', () => {
-    expect(gateway.getGatewayBinaryPath()).toBe(GATEWAY_BINARY);
-  });
+describe('gateway config generation', () => {
+  let proc: ReturnType<typeof createMockChildProcess>;
 
-  test('returns undefined when openshell-gateway is not registered', () => {
-    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
-    expect(gateway.getGatewayBinaryPath()).toBeUndefined();
-  });
-});
-
-describe('start', () => {
-  test('can retry after the gateway process emits an error without exiting', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const failedProcess = createMockChildProcess();
-    const retryProcess = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValueOnce(failedProcess).mockReturnValueOnce(retryProcess);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-    failedProcess.emit('error', new Error('spawn error'));
-    await gateway.start();
-
-    expect(spawn).toHaveBeenCalledTimes(2);
-    expect(gateway.isRunning()).toBe(true);
-  });
-
-  test('spawns the gateway process and writes its output only to the log', async () => {
-    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      [
-        '--config',
-        GATEWAY_CONFIG_PATH,
-        '--port',
-        '17670',
-        '--bind-address',
-        '127.0.0.1',
-        '--disable-tls',
-        '--db-url',
-        GATEWAY_DB_URL,
-      ],
-      expect.objectContaining({ detached: false }),
-    );
-    expect(createWriteStream).toHaveBeenCalledWith(GATEWAY_LOG_PATH, { flags: 'w' });
-    expect(gatewayLogStream.write).not.toHaveBeenCalled();
-
-    consoleLog.mockClear();
-    consoleError.mockClear();
-    const stdout = Buffer.from('routine gateway output\n');
-    const stderr = Buffer.from('routine gateway diagnostic\n');
-    proc._stdout.emit('data', stdout);
-    proc._stderr.emit('data', stderr);
-
-    expect(gatewayLogStream.write).toHaveBeenNthCalledWith(1, stdout);
-    expect(gatewayLogStream.write).toHaveBeenNthCalledWith(2, stderr);
-    expect(consoleLog).not.toHaveBeenCalled();
-    expect(consoleError).not.toHaveBeenCalled();
-  });
-
-  test('spawns with custom port and address', async () => {
+  beforeEach(() => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
+    proc = createMockChildProcess();
     vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start({ port: 9999, bindAddress: '0.0.0.0' });
-
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      [
-        '--config',
-        GATEWAY_CONFIG_PATH,
-        '--port',
-        '9999',
-        '--bind-address',
-        '0.0.0.0',
-        '--disable-tls',
-        '--db-url',
-        GATEWAY_DB_URL,
-      ],
-      expect.objectContaining({ detached: false }),
-    );
-  });
-
-  test('skips --disable-tls when disableTls is false', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start({ disableTls: false });
-
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      ['--config', GATEWAY_CONFIG_PATH, '--port', '17670', '--bind-address', '127.0.0.1', '--db-url', GATEWAY_DB_URL],
-      expect.objectContaining({ detached: false }),
-    );
-  });
-
-  test('passes --db-url pointing to the kaiden data directory', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      expect.arrayContaining(['--db-url', GATEWAY_DB_URL]),
-      expect.objectContaining({ detached: false }),
-    );
-  });
-
-  test('skips if already running', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-    await gateway.start();
-
-    expect(spawn).toHaveBeenCalledTimes(1);
-  });
-
-  test('throws when gateway binary is not registered', async () => {
-    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
-
-    await expect(gateway.start()).rejects.toThrow('openshell-gateway binary not registered');
-  });
-
-  test('performs health check via openshellCli', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    expect(openshellCli.checkEndpointStatus).toHaveBeenCalledWith('http://127.0.0.1:17670');
-  });
-
-  test('registers gateway via openshellCli after health check passes', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    expect(openshellCli.addGateway).toHaveBeenCalledWith({
-      endpoint: 'http://127.0.0.1:17670',
-      local: true,
-      name: 'kaiden-local',
-    });
-  });
-
-  test('skips re-registration when kaiden-local already exists with same endpoint', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'kaiden-local', endpoint: 'http://127.0.0.1:17670' } as GatewayInfo,
-    ]);
-
-    await gateway.start();
-
-    expect(openshellCli.removeGateway).not.toHaveBeenCalled();
-    expect(openshellCli.addGateway).not.toHaveBeenCalled();
-  });
-
-  test('removes stale gateway and re-registers when endpoint differs', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'kaiden-local', endpoint: 'http://127.0.0.1:9999' } as GatewayInfo,
-    ]);
-
-    await gateway.start();
-
-    expect(openshellCli.removeGateway).toHaveBeenCalledWith('kaiden-local');
-    expect(openshellCli.addGateway).toHaveBeenCalledWith({
-      endpoint: 'http://127.0.0.1:17670',
-      local: true,
-      name: 'kaiden-local',
-    });
-
-    const removeOrder = vi.mocked(openshellCli.removeGateway).mock.invocationCallOrder[0]!;
-    const addOrder = vi.mocked(openshellCli.addGateway).mock.invocationCallOrder[0]!;
-    expect(removeOrder).toBeLessThan(addOrder);
-  });
-
-  test('registers fresh when kaiden-local does not exist', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-
-    await gateway.start();
-
-    expect(openshellCli.removeGateway).not.toHaveBeenCalled();
-    expect(openshellCli.addGateway).toHaveBeenCalledWith({
-      endpoint: 'http://127.0.0.1:17670',
-      local: true,
-      name: 'kaiden-local',
-    });
-  });
-
-  test('registers successfully even when removeGateway fails', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'kaiden-local', endpoint: 'http://127.0.0.1:9999' } as GatewayInfo,
-    ]);
-    vi.mocked(openshellCli.removeGateway).mockRejectedValue(new Error('no such gateway'));
-
-    await gateway.start();
-
-    expect(openshellCli.addGateway).toHaveBeenCalledWith({
-      endpoint: 'http://127.0.0.1:17670',
-      local: true,
-      name: 'kaiden-local',
-    });
-  });
-
-  test('skips registerWithCli when skipRegistration is true', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start({ skipRegistration: true });
-
-    expect(spawn).toHaveBeenCalled();
-    expect(openshellCli.addGateway).not.toHaveBeenCalled();
   });
 
   test('generates certs by calling the gateway binary with generate-certs', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
 
     await gateway.start();
 
@@ -1008,713 +1179,6 @@ describe('start', () => {
       '--output-dir',
       GATEWAY_STORAGE_DIRECTORY,
     ]);
-  });
-
-  test('writes gateway.toml config with JWT paths', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    expect(writeFile).toHaveBeenCalledWith(
-      GATEWAY_CONFIG_PATH,
-      expect.stringContaining('[openshell.gateway.gateway_jwt]'),
-      'utf-8',
-    );
-    expect(writeFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, expect.stringContaining('signing_key_path'), 'utf-8');
-    expect(writeFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, expect.stringContaining('public_key_path'), 'utf-8');
-    expect(writeFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, expect.stringContaining('kid_path'), 'utf-8');
-  });
-
-  test('generates gateway config with non-expiring JWTs (ttl_secs = 0)', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    expect(writeFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, expect.stringContaining('ttl_secs = 0'), 'utf-8');
-  });
-
-  test('starts gateway without --config when cert generation fails', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(exec.exec).mockRejectedValue(new Error('generate-certs failed'));
-
-    await gateway.start();
-
-    expect(spawn).toHaveBeenCalledWith(
-      GATEWAY_BINARY,
-      ['--port', '17670', '--bind-address', '127.0.0.1', '--disable-tls', '--db-url', GATEWAY_DB_URL],
-      expect.objectContaining({ detached: false }),
-    );
-  });
-
-  test('backs up database, notifies, and retries once when migration error occurs', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-
-    const failProc = createMockChildProcess();
-    const retryProc = createMockChildProcess();
-
-    vi.mocked(spawn)
-      .mockImplementationOnce(() => {
-        setTimeout(() => {
-          failProc._stderr.emit(
-            'data',
-            Buffer.from(
-              'migration error: migration 7 was previously applied but is missing in the resolved migrations',
-            ),
-          );
-          Object.defineProperty(failProc, 'exitCode', { value: 1, configurable: true });
-          failProc.emit('exit', 1, undefined);
-        }, 0);
-        return failProc;
-      })
-      .mockReturnValueOnce(retryProc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
-
-    await gateway.start();
-
-    expect(spawn).toHaveBeenCalledTimes(2);
-    expect(rename).toHaveBeenCalledWith(
-      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db'),
-      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db.backup'),
-    );
-    expect(rename).toHaveBeenCalledWith(
-      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-wal'),
-      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-wal.backup'),
-    );
-    expect(rename).toHaveBeenCalledWith(
-      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-shm'),
-      join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db-shm.backup'),
-    );
-    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: 'OpenShell Gateway database migration error',
-        body: expect.stringContaining('kaiden-local'),
-        type: 'warn',
-        extensionId: 'core',
-      }),
-    );
-    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.stringContaining(join(GATEWAY_STORAGE_DIRECTORY, 'gateway.db.backup')),
-      }),
-    );
-  });
-
-  test('throws when retry after migration error also fails', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-
-    const failProc1 = createMockChildProcess();
-    const failProc2 = createMockChildProcess();
-
-    vi.mocked(spawn)
-      .mockImplementationOnce(() => {
-        setTimeout(() => {
-          failProc1._stderr.emit(
-            'data',
-            Buffer.from(
-              'migration error: migration 7 was previously applied but is missing in the resolved migrations',
-            ),
-          );
-          Object.defineProperty(failProc1, 'exitCode', { value: 1, configurable: true });
-          failProc1.emit('exit', 1, undefined);
-        }, 0);
-        return failProc1;
-      })
-      .mockImplementationOnce(() => {
-        setTimeout(() => {
-          Object.defineProperty(failProc2, 'exitCode', { value: 1, configurable: true });
-          failProc2.emit('exit', 1, undefined);
-        }, 0);
-        return failProc2;
-      });
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(false);
-
-    await expect(gateway.start()).rejects.toThrow('Gateway process exited before becoming ready');
-
-    expect(spawn).toHaveBeenCalledTimes(2);
-    expect(rename).toHaveBeenCalled();
-    expect(notificationRegistry.addNotification).toHaveBeenCalled();
-  });
-
-  test('does not back up database on non-migration errors', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockImplementation(() => {
-      setTimeout(() => {
-        proc._stderr.emit('data', Buffer.from('Socket not found: /var/run/docker.sock'));
-        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
-        proc.emit('exit', 1, undefined);
-      }, 0);
-      return proc;
-    });
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(false);
-
-    await expect(gateway.start()).rejects.toThrow('Gateway process exited before becoming ready');
-
-    expect(spawn).toHaveBeenCalledTimes(1);
-    expect(rename).not.toHaveBeenCalled();
-    expect(notificationRegistry.addNotification).not.toHaveBeenCalled();
-  });
-
-  test('stops the spawned process when waitForReady fails', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockRejectedValue(new Error('command not found'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(false);
-
-    let caughtError: unknown;
-    const startPromise = gateway.start().catch((err: unknown) => {
-      caughtError = err;
-    });
-
-    for (let i = 0; i < 30; i++) {
-      await vi.advanceTimersByTimeAsync(1000);
-    }
-
-    proc.emit('exit', 1, undefined);
-    await vi.advanceTimersByTimeAsync(5000);
-    await startPromise;
-
-    expect(caughtError).toBeInstanceOf(Error);
-    expect((caughtError as Error).message).toContain('Gateway did not become ready');
-    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
-    vi.useRealTimers();
-  });
-});
-
-describe('stop', () => {
-  test('sends SIGTERM to running process', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    const stopPromise = gateway.stop();
-    proc.emit('exit', 0, undefined);
-    await stopPromise;
-
-    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
-  });
-
-  test('does not clear a newer process when the stopped process exits late', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const stoppedProcess = createMockChildProcess();
-    const currentProcess = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValueOnce(stoppedProcess).mockReturnValueOnce(currentProcess);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    await gateway.start();
-    const stopPromise = gateway.stop();
-    await vi.advanceTimersByTimeAsync(5000);
-    await stopPromise;
-    await gateway.start();
-
-    stoppedProcess.emit('exit', 0, undefined);
-    expect(gateway.isRunning()).toBe(true);
-    vi.useRealTimers();
-  });
-
-  test('is a no-op when not running', async () => {
-    await gateway.stop();
-  });
-});
-
-describe('isRunning', () => {
-  test('returns false when no process is spawned', () => {
-    expect(gateway.isRunning()).toBe(false);
-  });
-
-  test('returns true when process is running', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    expect(gateway.isRunning()).toBe(true);
-  });
-});
-
-describe('dispose', () => {
-  test('stops gateways created from the settings UI', async () => {
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-
-    await gateway.createLocalGateway({
-      name: 'local-dev',
-      bindAddress: '127.0.0.1',
-      port: 17675,
-      driver: 'podman',
-    });
-
-    gateway.dispose();
-
-    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
-    proc.emit('exit', 0, undefined);
-  });
-
-  test('stops the gateway process and closes its log', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    await gateway.start();
-
-    gateway.dispose();
-
-    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
-    proc.emit('exit', 0, undefined);
-    await vi.waitFor(() => expect(gatewayLogStream.end).toHaveBeenCalledOnce());
-  });
-});
-
-describe('onDidGatewayStart', () => {
-  test('fires when existing gateway is healthy and active', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-gw', endpoint: 'https://127.0.0.1:8443', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    const listener = vi.fn();
-    gateway.onDidGatewayStart(listener);
-    await gateway.init();
-
-    expect(listener).toHaveBeenCalledOnce();
-  });
-
-  test('fires when existing gateway is healthy but not active', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'kaiden-alt', endpoint: 'http://127.0.0.1:18080', active: false },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    const listener = vi.fn();
-    gateway.onDidGatewayStart(listener);
-    await gateway.init();
-
-    expect(listener).toHaveBeenCalledOnce();
-  });
-
-  test('fires when orphan gateway found on default port', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-
-    const listener = vi.fn();
-    gateway.onDidGatewayStart(listener);
-    await gateway.init();
-
-    expect(listener).toHaveBeenCalledOnce();
-  });
-
-  test('fires when auto-start succeeds', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    const listener = vi.fn();
-    gateway.onDidGatewayStart(listener);
-    await gateway.init();
-
-    expect(listener).toHaveBeenCalledOnce();
-  });
-
-  test('does not fire when no binary and no gateways', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockRejectedValue(new Error('CLI not found'));
-    vi.mocked(cliToolRegistry.getCliToolInfos).mockReturnValue([] as unknown as CliToolInfo[]);
-
-    const listener = vi.fn();
-    gateway.onDidGatewayStart(listener);
-    await gateway.init();
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-});
-
-describe('onDidGatewayInitFailed', () => {
-  test('fires with error message when auto-start fails because process exits', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(false);
-
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockImplementation(() => {
-      setTimeout(() => {
-        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
-        proc.emit('exit', 1, undefined);
-      }, 0);
-      return proc;
-    });
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    const failListener = vi.fn();
-    const startListener = vi.fn();
-    gateway.onDidGatewayInitFailed(failListener);
-    gateway.onDidGatewayStart(startListener);
-
-    await gateway.init();
-
-    expect(failListener).toHaveBeenCalledOnce();
-    expect(failListener).toHaveBeenCalledWith(expect.stringContaining('Gateway process exited before becoming ready'));
-    expect(startListener).not.toHaveBeenCalled();
-  });
-
-  test('creates error notification when auto-start fails', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(false);
-
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockImplementation(() => {
-      setTimeout(() => {
-        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
-        proc.emit('exit', 1, undefined);
-      }, 0);
-      return proc;
-    });
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.init();
-
-    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: 'OpenShell Gateway failed to start',
-        type: 'error',
-        extensionId: 'core',
-      }),
-    );
-  });
-
-  test('includes stderr output in notification body', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(false);
-
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockImplementation(() => {
-      setTimeout(() => {
-        proc._stderr.emit('data', Buffer.from('Socket not found: /var/run/docker.sock'));
-        Object.defineProperty(proc, 'exitCode', { value: 1, configurable: true });
-        proc.emit('exit', 1, undefined);
-      }, 0);
-      return proc;
-    });
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    await gateway.init();
-
-    expect(notificationRegistry.addNotification).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.stringContaining('Socket not found: /var/run/docker.sock'),
-      }),
-    );
-  });
-
-  test('does not fire on successful init', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([]);
-    const proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValueOnce(false).mockResolvedValue(true);
-    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-
-    const failListener = vi.fn();
-    gateway.onDidGatewayInitFailed(failListener);
-    await gateway.init();
-
-    expect(failListener).not.toHaveBeenCalled();
-    expect(notificationRegistry.addNotification).not.toHaveBeenCalled();
-  });
-});
-
-describe('supportsMounts', () => {
-  beforeEach(async () => {
-    vi.mocked(spawn).mockReturnValue(createMockChildProcess());
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    await gateway.start();
-  });
-
-  test('queries runtime info for a discovered gateway instead of reading local config', async () => {
-    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true');
-    vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({
-      status: 'healthy',
-      compute_drivers: [{ name: 'podman', capabilities: { driver_name: 'podman' } }],
-    });
-    await expect(
-      gateway.supportsMounts({
-        name: 'discovered',
-        endpoint: 'http://127.0.0.1:17671',
-        type: 'local',
-        driver: 'podman',
-      }),
-    ).resolves.toBe(true);
-    expect(readFile).not.toHaveBeenCalled();
-    expect(openshellCli.getGatewayInfo).toHaveBeenCalledWith('discovered');
-  });
-
-  test.each([
-    { driver: 'podman' as const, config: '[openshell.drivers.docker]\nenable_bind_mounts = true', expected: false },
-    {
-      driver: 'podman' as const,
-      config:
-        '[openshell.drivers.podman]\nenable_bind_mounts = false\n[openshell.drivers.docker]\nenable_bind_mounts = true',
-      expected: false,
-    },
-    {
-      driver: 'docker' as const,
-      config: '[openshell.drivers.docker]\n  enable_bind_mounts = true # local sharing',
-      expected: true,
-    },
-    {
-      driver: 'podman' as const,
-      config: '[openshell.drivers."podman"]\nenable_bind_mounts = true',
-      expected: true,
-    },
-    { driver: 'podman' as const, config: 'openshell.drivers.podman.enable_bind_mounts = true', expected: true },
-    { driver: 'podman' as const, config: '[openshell.drivers.podman]\nenable_bind_mounts = "true"', expected: false },
-    {
-      driver: 'podman' as const,
-      config: '[openshell.drivers.podman]\nenable_bind_mounts = true\ninvalid = [',
-      expected: false,
-    },
-    { driver: 'podman' as const, config: '', expected: false },
-    { driver: 'vm' as const, config: '[openshell.drivers.vm]\nenable_bind_mounts = true', expected: false },
-    { driver: undefined, config: '[openshell.drivers.podman]\nenable_bind_mounts = true', expected: false },
-  ])('checks the active driver: $driver, $config', async ({ driver, config, expected }) => {
-    vi.mocked(readFile).mockResolvedValue(config);
-    await expect(
-      gateway.supportsMounts({
-        name: 'kaiden-local',
-        endpoint: 'http://127.0.0.1:17670',
-        type: 'local',
-        driver,
-      }),
-    ).resolves.toBe(expected);
-  });
-
-  test('returns true when the managed gateway config enables bind mounts', async () => {
-    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true\n');
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'kaiden-local',
-        endpoint: 'http://127.0.0.1:17670',
-        type: 'local',
-        driver: 'podman',
-      }),
-    ).resolves.toBe(true);
-    expect(readFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, 'utf-8');
-  });
-
-  test('returns false for gateways without a managed bind-mount config', async () => {
-    vi.mocked(readFile).mockRejectedValue(new Error('ENOENT'));
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'kaiden-local',
-        endpoint: 'http://127.0.0.1:17670',
-        type: 'local',
-        driver: 'podman',
-      }),
-    ).resolves.toBe(false);
-  });
-
-  test('falls back to runtime check when the managed gateway exits', async () => {
-    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true\n');
-    const info = {
-      name: 'kaiden-local',
-      endpoint: 'http://127.0.0.1:17670',
-      type: 'local' as const,
-      driver: 'podman' as const,
-    };
-    await expect(gateway.supportsMounts(info)).resolves.toBe(true);
-
-    vi.mocked(spawn).mock.results[0]?.value.emit('exit', 0);
-    vi.mocked(openshellCli.getGatewayInfo).mockRejectedValue(new Error('gateway unreachable'));
-
-    await expect(gateway.supportsMounts(info)).resolves.toBe(false);
-  });
-
-  test.each([
-    { type: 'remote' as const, endpoint: 'https://gateway.example.com', is_remote: true },
-    { type: 'local' as const, endpoint: 'http://10.0.0.5:17670' },
-  ])('returns false for $type registration at $endpoint despite managed storage', async registration => {
-    vi.mocked(readFile).mockResolvedValue('[openshell.drivers.podman]\nenable_bind_mounts = true\n');
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'kaiden-local',
-        ...registration,
-        driver: 'podman',
-      }),
-    ).resolves.toBe(false);
-    expect(readFile).not.toHaveBeenCalled();
-  });
-});
-
-describe('supportsMounts (non-managed gateways)', () => {
-  test.each([
-    'podman',
-    'docker',
-  ] as const)('returns true for a non-managed local gateway with %s driver', async driverName => {
-    vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({
-      status: 'healthy',
-      compute_drivers: [{ name: driverName, capabilities: { driver_name: driverName } }],
-    });
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'external-gw',
-        endpoint: 'http://127.0.0.1:17671',
-        type: 'local',
-        driver: driverName,
-      }),
-    ).resolves.toBe(true);
-    expect(openshellCli.getGatewayInfo).toHaveBeenCalledWith('external-gw');
-  });
-
-  test('returns false for a non-managed local gateway with vm driver', async () => {
-    vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({
-      status: 'healthy',
-      compute_drivers: [{ name: 'vm', capabilities: { driver_name: 'vm' } }],
-    });
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'external-gw',
-        endpoint: 'http://127.0.0.1:17671',
-        type: 'local',
-        driver: 'vm',
-      }),
-    ).resolves.toBe(false);
-  });
-
-  test('returns false when getGatewayInfo fails for a non-managed gateway', async () => {
-    vi.mocked(openshellCli.getGatewayInfo).mockRejectedValue(new Error('connection refused'));
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'external-gw',
-        endpoint: 'http://127.0.0.1:17671',
-        type: 'local',
-        driver: 'podman',
-      }),
-    ).resolves.toBe(false);
-  });
-
-  test('returns false when the non-managed gateway has no compute drivers', async () => {
-    vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({
-      status: 'healthy',
-      compute_drivers: [],
-    });
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'external-gw',
-        endpoint: 'http://127.0.0.1:17671',
-        type: 'local',
-        driver: 'podman',
-      }),
-    ).resolves.toBe(false);
-  });
-
-  test('returns false for a non-managed remote gateway with podman driver', async () => {
-    await expect(
-      gateway.supportsMounts({
-        name: 'remote-gw',
-        endpoint: 'https://gateway.example.com',
-        type: 'local',
-        is_remote: true,
-        driver: 'podman',
-      }),
-    ).resolves.toBe(false);
-    expect(openshellCli.getGatewayInfo).not.toHaveBeenCalled();
-  });
-
-  test('returns false for a non-managed gateway on a non-local endpoint', async () => {
-    await expect(
-      gateway.supportsMounts({
-        name: 'external-gw',
-        endpoint: 'http://10.0.0.5:17671',
-        type: 'local',
-        driver: 'podman',
-      }),
-    ).resolves.toBe(false);
-    expect(openshellCli.getGatewayInfo).not.toHaveBeenCalled();
-  });
-
-  test('returns true for a non-managed gateway bound to IPv6 loopback [::1]', async () => {
-    vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({
-      status: 'healthy',
-      compute_drivers: [{ name: 'podman', capabilities: { driver_name: 'podman' } }],
-    });
-
-    await expect(
-      gateway.supportsMounts({
-        name: 'ipv6-gw',
-        endpoint: 'http://[::1]:17671',
-        type: 'local',
-        driver: 'podman',
-      }),
-    ).resolves.toBe(true);
-    expect(openshellCli.getGatewayInfo).toHaveBeenCalledWith('ipv6-gw');
-  });
-});
-
-describe('gateway config generation', () => {
-  let proc: ReturnType<typeof createMockChildProcess>;
-
-  beforeEach(() => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    proc = createMockChildProcess();
-    vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
   });
 
   test('writes gateway config under the kaiden data directory', async () => {
@@ -1740,6 +1204,21 @@ describe('gateway config generation', () => {
     expect(writtenContent).toContain('compute_drivers = ["podman"]');
     expect(writtenContent).not.toContain('[openshell.drivers.vm]');
     expect(writtenContent).not.toContain('[openshell.drivers.docker]');
+  });
+
+  test('writes gateway.toml config with JWT paths', async () => {
+    vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
+
+    await gateway.start();
+
+    expect(writeFile).toHaveBeenCalledWith(
+      GATEWAY_CONFIG_PATH,
+      expect.stringContaining('[openshell.gateway.gateway_jwt]'),
+      'utf-8',
+    );
+    expect(writeFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, expect.stringContaining('signing_key_path'), 'utf-8');
+    expect(writeFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, expect.stringContaining('public_key_path'), 'utf-8');
+    expect(writeFile).toHaveBeenCalledWith(GATEWAY_CONFIG_PATH, expect.stringContaining('kid_path'), 'utf-8');
   });
 
   test('pins supervisor image to detected gateway version', async () => {
@@ -1834,7 +1313,7 @@ describe('gateway config generation', () => {
 
   test('honors an explicit VM driver and omits container settings even when the active driver is Podman', async () => {
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.116'));
-    vi.mocked(openshellCli.getGatewayInfo).mockResolvedValue({
+    vi.mocked(gatewayManager.getGatewayInfo).mockResolvedValue({
       status: 'healthy',
       compute_drivers: [{ capabilities: { driver_name: 'podman' }, name: 'podman' }],
     });
@@ -1850,7 +1329,7 @@ describe('gateway config generation', () => {
 
   test('defaults to Podman when no gateway is available', async () => {
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.getGatewayInfo).mockRejectedValue(new Error('No gateway configured'));
+    vi.mocked(gatewayManager.getGatewayInfo).mockRejectedValue(new Error('No gateway configured'));
 
     await gateway.start();
 
@@ -1858,7 +1337,7 @@ describe('gateway config generation', () => {
     expect(writtenContent).toContain('[openshell.drivers.podman]');
     expect(writtenContent).toContain('enable_bind_mounts = true');
     expect(writtenContent).toContain('compute_drivers = ["podman"]');
-    expect(openshellCli.getGatewayInfo).not.toHaveBeenCalled();
+    expect(gatewayManager.getGatewayInfo).not.toHaveBeenCalled();
   });
 });
 
@@ -1867,7 +1346,6 @@ describe('gateway.pid persistence', () => {
     const proc = createMockChildProcess();
     Object.defineProperty(proc, 'pid', { value: 12345 });
     vi.mocked(spawn).mockReturnValue(proc);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
 
     await gateway.createLocalGateway({
@@ -1887,7 +1365,6 @@ describe('gateway.pid persistence', () => {
     Object.defineProperty(proc, 'pid', { value: 54321 });
     vi.mocked(spawn).mockReturnValue(proc);
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
 
     await gateway.start();
 
@@ -1899,7 +1376,6 @@ describe('gateway.pid persistence', () => {
     const proc = createMockChildProcess();
     vi.mocked(spawn).mockReturnValue(proc);
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
 
     await gateway.start();
 
@@ -1916,7 +1392,6 @@ describe('gateway.pid persistence', () => {
     Object.defineProperty(proc, 'pid', { value: 12345 });
     vi.mocked(spawn).mockReturnValue(proc);
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
 
     await gateway.start();
     proc.emit('exit', 0, undefined);
@@ -1933,7 +1408,6 @@ describe('gateway.pid persistence', () => {
     Object.defineProperty(proc, 'pid', { value: 12345 });
     vi.mocked(spawn).mockReturnValue(proc);
     vi.mocked(exec.exec).mockResolvedValue(mockExecResult('openshell-gateway 0.0.69'));
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
 
     await gateway.start();
     proc.emit('error', new Error('spawn error'));
@@ -1941,117 +1415,6 @@ describe('gateway.pid persistence', () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(unlink).toHaveBeenCalledWith(join(GATEWAY_STORAGE_DIRECTORY, 'gateway.pid'));
-  });
-
-  test('reads and validates PID on init when process is still alive', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(readFile).mockResolvedValue('12345');
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
-
-    await gateway.init();
-
-    const pidPath = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'local-dev', 'gateway.pid');
-    expect(readFile).toHaveBeenCalledWith(pidPath, 'utf-8');
-    expect(killSpy).toHaveBeenCalledWith(12345, 0);
-    expect(unlink).not.toHaveBeenCalledWith(pidPath);
-    killSpy.mockRestore();
-  });
-
-  test('removes stale gateway.pid when process is dead', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(readFile).mockResolvedValue('99999');
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
-      const err = new Error('ESRCH') as NodeJS.ErrnoException;
-      err.code = 'ESRCH';
-      throw err;
-    });
-
-    await gateway.init();
-
-    const pidPath = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'local-dev', 'gateway.pid');
-    expect(unlink).toHaveBeenCalledWith(pidPath);
-    killSpy.mockRestore();
-  });
-
-  test('keeps gateway.pid when process.kill throws EPERM', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(readFile).mockResolvedValue('12345');
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
-      const err = new Error('EPERM') as NodeJS.ErrnoException;
-      err.code = 'EPERM';
-      throw err;
-    });
-
-    await gateway.init();
-
-    const pidPath = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'local-dev', 'gateway.pid');
-    expect(unlink).not.toHaveBeenCalledWith(pidPath);
-    killSpy.mockRestore();
-  });
-
-  test('ignores missing gateway.pid file during init', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(readFile).mockRejectedValue(new Error('ENOENT'));
-
-    await gateway.init();
-
-    expect(unlink).not.toHaveBeenCalled();
-  });
-
-  test('keeps gateway.pid when process.kill throws unknown error', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(readFile).mockResolvedValue('12345');
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
-      const err = new Error('EINVAL') as NodeJS.ErrnoException;
-      err.code = 'EINVAL';
-      throw err;
-    });
-
-    await gateway.init();
-
-    const pidPath = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'local-dev', 'gateway.pid');
-    expect(unlink).not.toHaveBeenCalledWith(pidPath);
-    killSpy.mockRestore();
-  });
-
-  test('removes gateway.pid with invalid content during init', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.mocked(existsSync).mockReturnValue(true);
-    vi.mocked(openshellCli.listGateways).mockResolvedValue([
-      { name: 'local-dev', endpoint: 'http://127.0.0.1:17675', active: true, type: 'local' },
-    ]);
-    vi.mocked(openshellCli.checkEndpointStatus).mockResolvedValue(true);
-    vi.mocked(readFile).mockResolvedValue('not-a-number');
-
-    await gateway.init();
-
-    const pidPath = join(KAIDEN_DATA_DIRECTORY, 'openshell-gateways', 'local-dev', 'gateway.pid');
-    expect(unlink).toHaveBeenCalledWith(pidPath);
   });
 
   test('getGatewayPid returns pid for alive process', async () => {
