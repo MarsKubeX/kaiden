@@ -264,6 +264,7 @@ import { Troubleshooting } from './troubleshooting.js';
 import { DirectoryStrategy } from './util/directory-strategy.js';
 import { Exec } from './util/exec.js';
 import { getFreePort, getFreePortRange, isFreePort } from './util/port.js';
+import { INTERACTIVE_SHELL_COMMAND, InteractiveShellCommand } from './util/shell-command.js';
 import { TaskConnectionUtils } from './util/task-connection-utils.js';
 import { ViewRegistry } from './view-registry.js';
 import { DevToolsManager } from './webview/devtools-manager.js';
@@ -579,6 +580,7 @@ export class PluginSystem {
 
     const exec = new Exec(proxy);
     container.bind<Exec>(Exec).toConstantValue(exec);
+    container.bind<readonly string[]>(InteractiveShellCommand).toConstantValue(INTERACTIVE_SHELL_COMMAND);
 
     container.bind<Telemetry>(Telemetry).toSelf().inSingletonScope();
     const telemetry = container.get<Telemetry>(Telemetry);

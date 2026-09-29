@@ -66,6 +66,8 @@ vi.mock(import('yaml'));
 vi.mock(import('/@/plugin/openshell-cli/openshell-cli.js'));
 vi.mock(import('/@/plugin/openshell-cli/openshell-policy-manager.js'));
 
+const TEST_SHELL_COMMAND = ['/test/shell'];
+
 const openshellNetworkPolicy = new OpenshellNetworkPolicy();
 const openshellPolicyManager = new OpenshellPolicyManager({} as never);
 
@@ -295,6 +297,7 @@ beforeEach(() => {
     directories,
     openshellPolicyManager,
     openshellNetworkPolicy,
+    TEST_SHELL_COMMAND,
   );
   manager.init();
 });
@@ -1876,7 +1879,7 @@ describe('shellInAgentWorkspace', () => {
 
     expect(sdkSandbox.execInteractive).toHaveBeenCalledWith(
       'test-workspace-1',
-      ['/bin/sh'],
+      TEST_SHELL_COMMAND,
       expect.objectContaining({ tty: true }),
     );
   });
@@ -2141,7 +2144,7 @@ describe('agent session lifecycle', () => {
       await manager.create(options);
       mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
 
-      expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('my-sandbox', ['/bin/sh'], expect.anything());
+      expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('my-sandbox', TEST_SHELL_COMMAND, expect.anything());
       await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('claude\n')));
       expect(webContents.send).not.toHaveBeenCalledWith('agent-workspace:terminal-onData', expect.anything(), '$ ');
     });
@@ -2180,7 +2183,7 @@ describe('agent session lifecycle', () => {
     mock.pushEvent({ stream: 'stdout', data: Buffer.from('$ ') });
 
     await vi.waitFor(() => expect(webContents.send).toHaveBeenCalledWith('agent-workspace:terminal-onData', 10, '$ '));
-    expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('agent-workspace', ['/bin/sh'], expect.anything());
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('agent-workspace', TEST_SHELL_COMMAND, expect.anything());
     expect(mock.session.write).not.toHaveBeenCalled();
 
     await getIpcHandler<(_l: unknown, id: number, content: string) => Promise<void>>('agent-workspace:terminalSend')(
@@ -2391,7 +2394,7 @@ describe('agent session lifecycle', () => {
 
     await vi.waitFor(() => expect(mock.session.write).toHaveBeenCalledWith(Buffer.from('/usr/bin/agent start\n')));
     expect(sdkSandbox.execInteractive).toHaveBeenCalledTimes(1);
-    expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('agent-workspace', ['/bin/sh'], expect.anything());
+    expect(sdkSandbox.execInteractive).toHaveBeenCalledWith('agent-workspace', TEST_SHELL_COMMAND, expect.anything());
 
     // a terminal opened meanwhile attaches to the same session
     await getTerminalHandler()({}, 'ws-agent', 10);

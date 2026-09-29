@@ -43,6 +43,7 @@ import { ProviderRegistry } from '/@/plugin/provider-registry.js';
 import { SecretManager } from '/@/plugin/secret-manager/secret-manager.js';
 import { TaskManager } from '/@/plugin/tasks/task-manager.js';
 import { resolveHomePath } from '/@/plugin/util/resolve-home-path.js';
+import { InteractiveShellCommand } from '/@/plugin/util/shell-command.js';
 import { AgentWorkspaceSettings } from '/@api/agent-workspace/agent-workspace-settings.js';
 import type {
   AgentWorkspaceConfiguration,
@@ -167,6 +168,8 @@ export class AgentWorkspaceManager implements Disposable {
     private readonly openshellPolicyManager: OpenshellPolicyManager,
     @inject(OpenshellNetworkPolicy)
     private readonly openshellNetworkPolicy: OpenshellNetworkPolicy,
+    @inject(InteractiveShellCommand)
+    private readonly interactiveShellCommand: readonly string[],
   ) {}
 
   private getGlobalConfigDir(gateway: string, sandboxName: string): string {
@@ -735,7 +738,7 @@ export class AgentWorkspaceManager implements Disposable {
   }> {
     const abortController = new AbortController();
     const sdkClient = await this.openshellSdkClientManager.getClient(gateway);
-    const execSession = await sdkClient.sandbox.execInteractive(name, ['/bin/sh'], {
+    const execSession = await sdkClient.sandbox.execInteractive(name, [...this.interactiveShellCommand], {
       tty: true,
       signal: abortController.signal,
     });
