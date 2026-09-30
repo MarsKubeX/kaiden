@@ -23,13 +23,13 @@ import type { WSL2Check } from '../checks/windows/wsl2-check';
 
 Never use raw Tailwind color classes (e.g. `bg-red-500`, `text-gray-700`, `border-blue-300`) directly. Always use CSS variables from the color-registry so values can be tuned by themes (light/dark mode and custom themes).
 
-Format: `[var(--pd-<color-name>)]`
+Format: `(--pd-<color-name>)` (Tailwind v4 short syntax). Use it in new code; don't rewrite existing `[var(--pd-<color-name>)]` lines just to convert them.
 
 ✅ **Use this pattern:**
 
 ```svelte
-<div class="bg-[var(--pd-content-bg)] text-[var(--pd-content-text)]">...</div>
-<Button class="bg-[var(--pd-button-primary-bg)]"/>
+<div class="bg-(--pd-content-bg) text-(--pd-content-text)">...</div>
+<Button class="bg-(--pd-button-primary-bg)"/>
 ```
 
 🚫 **Instead of:**
@@ -50,7 +50,7 @@ To find the right color variable:
 
 ### Usage of `@podman-desktop/ui-svelte` components
 
-Before creating any new UI component from scratch, **always check `@podman-desktop/ui-svelte` first**. This is the shared component library that Kortex builds on. Available components:
+Before creating any new UI component from scratch, **always check `@podman-desktop/ui-svelte` first**. This is the shared component library that Kaiden builds on. Available components:
 
 | Component                                                                      | Import                            | Purpose                |
 | ------------------------------------------------------------------------------ | --------------------------------- | ---------------------- |
@@ -101,11 +101,11 @@ import { faGear } from '@fortawesome/free-solid-svg-icons';
 <i class="fas fa-gear"></i>
 ```
 
-### Reuse existing Kortex Svelte components
+### Reuse existing Kaiden Svelte components
 
-If `@podman-desktop/ui-svelte` doesn't have what you need, check Kortex's own shared components before building from scratch:
+If `@podman-desktop/ui-svelte` doesn't have what you need, check Kaiden's own shared components before building from scratch:
 
-- `packages/renderer/src/lib/ui/` — Kortex-specific UI components (Badge, CopyToClipboard, StatusDot, Steps, SlideToggle, Typeahead, etc.)
+- `packages/renderer/src/lib/ui/` — Kaiden-specific UI components (Badge, CopyToClipboard, StatusDot, Steps, SlideToggle, Typeahead, etc.)
 - `packages/renderer/src/lib/button/` — Button components
 - `packages/renderer/src/lib/table/` — Table components
 - `packages/renderer/src/lib/modal/` — Modal dialogs
@@ -127,13 +127,13 @@ async function onButtonClicked(): Promise<void> {
 }
 </script>
 
-<button on:click={onButtonClicked}>
+<button onclick={onButtonClicked}>
 ```
 
 🚫 **Instead of:**
 
 ```ts
-<button on:click={(): Promise<void> => { /* the code here */ }}>
+<button onclick={(): Promise<void> => { /* the code here */ }}>
 ```
 
 If values have to be passed from the template to the function, use the `bind` method on the function to pass the parameter.
@@ -148,7 +148,7 @@ async function onButtonClicked(object: Object): Promise<void> {
 </script>
 
 {#each objects as object (object.id)}
-  <button on:click={onButtonClicked.bind(undefined, object)}>
+  <button onclick={onButtonClicked.bind(undefined, object)}>
 {/each}
 ```
 
@@ -156,7 +156,7 @@ async function onButtonClicked(object: Object): Promise<void> {
 
 ```ts
 {#each objects as object (object.id)}
-  <button on:click={(): Promise<void> => onButtonClicked(object)}>
+  <button onclick={(): Promise<void> => onButtonClicked(object)}>
 {/each}
 ```
 
@@ -265,17 +265,15 @@ test('...', () => {
 });
 ```
 
-### Mock complete modules, spy on parts of module for specific tests
+### Mock complete modules
 
-When testing a module, you have to decide for each imported module if you mock the entire module or if you spy on specific functions of the module
-for specific tests and keep the real implementation for the other functions.
+System modules (`node:fs`, etc) are mocked, so unit tests run in isolation from the system. Internal modules are either mocked entirely or used with their real implementation.
 
-System modules (`node:fs`, etc) are most generally mocked, so you are sure that unit tests are executed in isolation of the system. For internal modules,
-it's up to you to decide if you want to mock them or not, depending on the coverage you want for the unit tests.
+Do not use `vi.spyOn`, `vi.hoisted` or hand-written mock factories when automocking suffices. If you need to mock only one function of a module, it is a sign that the function belongs in an injectable class: inject a test double with a `vi.fn()` method. Use `vi.mocked(MyClass.prototype.myMethod)` only when that method is already mocked. To test a protected method, declare a `TestXxx extends Xxx` subclass in the spec instead of exporting internals.
 
 #### Mock a complete module
 
-Mock completely an imported module with `vi.mock('/path/to/module')`, and define mock implementation for each test with `vi.mocked(function).mock...()`.
+Mock completely an imported module with `vi.mock(import('/path/to/module'))`, and define mock implementation for each test with `vi.mocked(function).mock...()`.
 
 Use `vi.resetAllMocks()` in the top-level `beforeEach` to reset all mocks to a no-op function returning `undefined` before starting each test.
 
@@ -285,7 +283,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 // completely mock the fs module, to be sure to
 // run the tests in complete isolation from the filesystem
-vi.mock('node:fs');
+vi.mock(import('node:fs'));
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -316,60 +314,6 @@ describe('the file does not exist', () => {
 test('file existence is not defined', () => {
   // a no-op mock returning undefined is called
   expect(codeCheckingIfFileExists('/file/not/found')).toBeUndefined();
-});
-```
-
-#### Spy on a function for a specific test
-
-When you want to mock only one or a small number of functions of a module (for example a function of the module you are testing, or a function of an helper module from which you want to use real implementation for some functions) for a particular test, you can use `vi.spyOn(module, 'function')` to mock only `function` and keep the original implementation for the rest of the module.
-
-To be sure that the spied function is restored to its original implementation for the other tests, use `vi.restoreAllMocks()` in the top-level `beforeEach`.
-
-```ts
-// helpers.ts
-export function f1(): boolean {
-  return true;
-}
-
-// mymodule.ts
-import { f1 } from './helpers.js';
-
-export class MyModuleToTest {
-  f2(): boolean {
-    return f1();
-  }
-}
-
-// mymodule.spec.ts
-import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { MyModuleToTest } from './mymodule.js';
-import * as helpers from './helpers.js';
-
-let myModuleToTest: MyModuleToTest;
-
-beforeEach(() => {
-  myModuleToTest = new MyModuleToTest();
-
-  // restore f1 to its original implementation
-  vi.restoreAllMocks();
-});
-
-describe('f1 returns false', () => {
-  beforeEach(() => {
-    vi.spyOn(helpers, 'f1').mockReturnValue(false);
-  });
-
-  test('f2 returns false', () => {
-    expect(myModuleToTest.f2()).toBeFalsy();
-    expect(helpers.f1).toHaveBeenCalledOnce();
-  });
-});
-
-test('f2 returns true', () => {
-  // use the original implementation of f1
-  expect(myModuleToTest.f2()).toBeTruthy();
-  // this won't work, as f1 is not spied for this test
-  // expect(helpers.f1).toHaveBeenCalledOnce();
 });
 ```
 
@@ -563,6 +507,8 @@ afterEach(() => {
 ```
 
 ### Snapshots
+
+Prefer explicit assertions. Adding snapshot tests to an area that doesn't use them yet needs a team discussion first.
 
 Vitest snapshots are a powerful tool to ensure UI components and complex data structures do not change unexpectedly. They are particularly effective for catching regressions in rendered HTML or large objects without writing manual assertions for every property. When a snapshot detects a diff, you can update it using the `-u` param:
 

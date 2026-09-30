@@ -183,7 +183,7 @@ Use `/@/` path aliases (e.g., `'/@/plugin/provider-registry.js'`) instead of rel
 
 The main/renderer communication follows a structured pattern:
 
-- Main process exposes handlers via `ipcHandle()` in `packages/main/src/plugin/index.ts`
+- Main process exposes handlers via `ipcHandle()`. New handlers are registered in the owning service (e.g. `packages/main/src/plugin/skill/skill-manager.ts`), not added to `packages/main/src/plugin/index.ts`
 - Handlers follow naming convention: `<registry-name>:<action>` (e.g., `container-provider-registry:listContainers`)
 - Renderer invokes via exposed preload APIs
 - Events are sent to renderer via `apiSender.send()` for real-time updates
@@ -205,6 +205,13 @@ Unit tests use Vitest and follow these conventions:
 - **Mocking**: Use `vi.mock(import('...'))` for auto-mocking modules. Avoid manual mock factories (`vi.mock('...', () => ({...}))`) when possible
 - **Resetting mocks**: Use `vi.resetAllMocks()` in `beforeEach`, not `vi.clearAllMocks()`
 - **Customizing auto-mocks**: When an auto-mocked function or class method needs a real implementation, use `vi.mocked(...)`. For class methods, use the prototype pattern: `vi.mocked(MyClass.prototype.myMethod).mockImplementation(...)`
+- **Coverage**: Every new or changed behaviour, bug fix and error path ships with unit tests in the same change
+- **No manual mocks**: No `vi.spyOn`, `vi.hoisted`, hand-written mock factories or `const xMock = vi.fn()` constants when automocking works
+- **Renderer `window.*`**: Preload methods are already auto-mocked by the shared setup. Use `vi.mocked(window.xxx).mockResolvedValue(...)`; never `Object.defineProperty(window, ...)` or `vi.stubGlobal`
+- **Fresh state**: No `vi.clearAllMocks`/`vi.restoreAllMocks`, no `afterEach`/`afterAll`/`beforeAll`; build state in `beforeEach`
+- **Don't bend the harness**: Don't modify vitest config or shared test helpers to make one test pass. Don't duplicate production constants or logic in specs. Test protected methods through a `TestXxx extends Xxx` subclass declared in the spec instead of exporting internals
+- **Assertions**: Use `assert(value)` (narrows) instead of `expect(value).toBeDefined()`. Assert actual outcomes, not only that something was called. Never flip an existing assertion to codify a regression
+- **Misc**: No real network (use `msw`); keep default `waitFor` intervals/timeouts; `mockResolvedValue` over `mockImplementation(async () => ...)`; `test.each` for repeated cases
 
 ### Extension Lifecycle
 
@@ -230,6 +237,53 @@ Configuration is managed through `ConfigurationRegistry`:
 - `MCPIPCHandler`: IPC bridge for MCP operations
 - MCP servers provide tools that can be accessed by AI models
 - Credentials and setup stored securely via `SafeStorageRegistry`
+
+## Coding Rules (enforced in review)
+
+These rules come from recurring maintainer review feedback. Detailed patterns and examples live in `CODE-GUIDELINES.md`.
+
+### Scope and commits
+
+- Stay within the scope of the GitHub issue linked to the task. Change only what it needs: no drive-by reformatting, import reordering, renames, or edits to unrelated files/config. One concern per PR (or commit); prerequisite refactors land separately
+- Don't change existing tests and implementation in the same change unless the test asserts the behaviour being changed
+- Before removing or changing existing behaviour, check `git log`/`git blame` for why it was introduced
+- Commit titles use semantic types with a scope (`fix(renderer): ...`, `feat(api): ...`) and are signed off (`git commit -s`)
+- New files carry the Apache-2.0 header with the current year only (no copied year range)
+- Follow the existing sibling pattern; don't invent a new one when an equivalent exists
+
+### TypeScript
+
+- No `!` non-null assertions, no `as X` / `as unknown as X` without a runtime check, no `any`, no `null` (use `undefined`), no `eslint-disable` comments
+- Optional members as `name?: T`; `??` over `||` for defaults; use `toSorted()` when a copy is intended and `sort()` when in-place mutation is required
+- No synchronous APIs (`execSync`, `fs.*Sync`) in async code; no `void promise`; `async/await` over `.then` chains
+- Never swallow errors: every `catch` logs with identifying context; cleanup that must always run goes in `finally`
+- Node built-ins use the `node:` prefix; all imports at the top of the file
+
+### Main process and DI
+
+- No new exported or file-scope functions in `packages/main`, even if the file already has some: put logic in an injectable class or a private/protected method
+- Never `new` a collaborator; inject it. Constructors stay empty; initialize in `init()` / `@postConstruct()`. Bind with `bind(X).toSelf().inSingletonScope()`
+- Dispose every `Disposable` returned by `onDidChange*` subscriptions. Every registered configuration property declares a default
+- Main stays generic: no hardcoded product name (read `product.json`), no renderer identifiers. Filesystem paths come from `Directories` (`packages/main/src/plugin/directories.ts`)
+- Shared types live in `packages/api`, which never imports from `packages/main`. Extensions depend on core only through `@openkaiden/api`
+
+### Extension API (`packages/extension-api`)
+
+- Backward compatibility is absolute: never change or remove exported signatures, return types or fields. Add optional members; put new optional params into the existing `xxxOptions` object. Every new field has JSDoc including its default
+
+### Svelte 5 / renderer
+
+- Runes only in new code: computed values use `$derived` / `$derived.by` (including `await` inside `$derived`); `$effect` only for side effects, never to assign state. No `$:`, no `on:click` (use `onclick`)
+- Data loading is reactive to props: no fetching in `onMount`
+- Props use a `Props` interface; extend `HTMLAttributes<...>` instead of ad-hoc `class?` props
+- Tailwind utilities only: no `<style>` blocks, no inline `style=`; colors from the color-registry (see `CODE-GUIDELINES.md`)
+- Logic (parsing, validation, computation) lives in a `.ts` file so it can be unit-tested; the component only renders
+- No `tick()` in component code; no Node types (`NodeJS.Timeout`) in renderer code
+- Migrate components in place; never create a duplicated `XxxV5` copy
+
+### Dependencies
+
+- No new dependency without discussion; prefer stdlib or an already-installed package. `@types/*` go in devDependencies; pnpm overrides are scoped (`parent>dep`), never global
 
 ## Important Patterns
 
