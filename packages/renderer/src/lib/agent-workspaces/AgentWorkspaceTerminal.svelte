@@ -284,7 +284,11 @@ onMount(async () => {
       return;
     }
     window.addEventListener('resize', handleResize);
+    const activeBeforeAttach = document.activeElement;
     await executeShellInWorkspace();
+    if (!destroyed && document.activeElement === activeBeforeAttach) {
+      shellTerminal?.focus();
+    }
   } catch (err: unknown) {
     console.error(`Error starting terminal for workspace ${workspaceId}`, err);
     scheduleReconnect();
