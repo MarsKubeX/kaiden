@@ -244,13 +244,14 @@ export class AgentWorkspaceManager implements Disposable {
     }
 
     const configDir = options.sourcePath ? undefined : this.getGlobalConfigDir(options.gateway, sandboxName);
-    const workspace = await writeWorkspaceConfig(options, configDir);
     const agent = this.agentRegistry.getAgentRegistration(options.agent);
-    const configurationUploads: OpenshellUpload[] = [];
-    const supportsMounts = await this.openshellGateway.supportsMounts(gateway);
     if (!agent) {
       throw new Error(`Unable to create workspace: agent ${options.agent} not registered`);
     }
+    const workspace = await writeWorkspaceConfig(options, configDir);
+    const effectiveImage = workspace.image ?? agent.baseImage;
+    const configurationUploads: OpenshellUpload[] = [];
+    const supportsMounts = await this.openshellGateway.supportsMounts(gateway);
 
     const writable = await Promise.all(
       agent.configurationFiles.map(
@@ -323,7 +324,7 @@ export class AgentWorkspaceManager implements Disposable {
     const sdkClient = await this.openshellSdkClientManager.getClient(options.gateway);
     await sdkClient.sandbox.create({
       name: sandboxName,
-      image: options.image ?? agent.baseImage,
+      image: effectiveImage,
       providers: options.secrets,
       environment: env && Object.keys(env).length > 0 ? env : undefined,
       labels: {
@@ -336,7 +337,7 @@ export class AgentWorkspaceManager implements Disposable {
         gateway.driver && mounts.length > 0
           ? {
               template: {
-                image: options.image ?? agent.baseImage,
+                image: effectiveImage,
                 driverConfig: { [gateway.driver]: { mounts: mounts.map(mount => ({ ...mount })) } },
               },
             }

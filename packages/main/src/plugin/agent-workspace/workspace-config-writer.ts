@@ -82,6 +82,12 @@ export async function writeWorkspaceConfig(
     existing.description = options.description;
   }
 
+  if (options.image !== undefined) {
+    existing.image = options.image;
+  } else {
+    delete existing.image;
+  }
+
   if (hasSkills) {
     existing.skills = options.skills;
   }
