@@ -1,12 +1,9 @@
 <script lang="ts">
-import '/@/lib/ui/code-copy.css';
-
 import { faBan, faCheck, faCircleNotch, faExclamationTriangle } from '@fortawesome/free-solid-svg-icons';
 import { Button } from '@podman-desktop/ui-svelte';
 import { Icon } from '@podman-desktop/ui-svelte/icons';
 
 import Markdown from '/@/lib/markdown/Markdown.svelte';
-import { codeCopyButtons } from '/@/lib/ui/code-copy-action';
 import type { AcpFlowToolCallEvent } from '/@api/acp-session-info';
 
 import AcpCopyButton from './AcpCopyButton.svelte';
@@ -134,12 +131,12 @@ async function handleOption(optionId: string): Promise<void> {
 
   <!-- Output section -->
   {#if showOutput && event.content}
-    <div class="group/output relative border-t border-[var(--pd-content-divider)]" use:codeCopyButtons>
+    <div class="group/output relative border-t border-[var(--pd-content-divider)]">
       <div class="absolute top-1 right-1 opacity-0 group-hover/output:opacity-100 group-focus-within/output:opacity-100 transition-opacity z-10">
         <AcpCopyButton text={event.content} />
       </div>
       {#if isShortOutput}
-        <div class="px-4 py-2.5 text-sm text-[var(--pd-content-text)]">
+        <div class="px-4 py-2.5 text-sm text-[var(--pd-content-text)] whitespace-pre-wrap" role="log">
           <Markdown markdown={event.content} />
         </div>
       {:else}
@@ -152,7 +149,7 @@ async function handleOption(optionId: string): Promise<void> {
           <span class="opacity-50">({outputLineCount} lines)</span>
         </button>
         {#if outputExpanded}
-          <div class="px-4 pb-3 text-sm text-[var(--pd-content-text)]">
+          <div class="px-4 pb-3 text-sm text-[var(--pd-content-text)] whitespace-pre-wrap" role="log">
             <Markdown markdown={event.content} />
           </div>
         {:else}

@@ -93,3 +93,31 @@ test('should not render copy buttons when no command and no output', () => {
   render(AcpFlowToolCall, { event: BASE_TOOL_CALL, sessionId: 'session-1' });
   expect(screen.queryByRole('button', { name: 'Copy to clipboard' })).not.toBeInTheDocument();
 });
+
+test('should render exactly one copy button for output without command', () => {
+  const event: AcpFlowToolCallEvent = {
+    ...BASE_TOOL_CALL,
+    content: 'some output',
+  };
+  render(AcpFlowToolCall, { event, sessionId: 'session-1' });
+  const copyButtons = screen.getAllByRole('button', { name: 'Copy to clipboard' });
+  expect(copyButtons.length).toBe(1);
+});
+
+test.each([
+  { label: 'short output', content: 'SHELL=/bin/bash\nHOME=/home/user\nPATH=/usr/bin', expand: false },
+  {
+    label: 'expanded long output',
+    content: Array.from({ length: 10 }, (_, i) => `LINE_${i}=value${i}`).join('\n'),
+    expand: true,
+  },
+])('should preserve newlines in $label', async ({ content, expand }) => {
+  const event: AcpFlowToolCallEvent = { ...BASE_TOOL_CALL, content };
+  render(AcpFlowToolCall, { event, sessionId: 'session-1' });
+  if (expand) {
+    await fireEvent.click(screen.getByRole('button', { name: /Output/ }));
+  }
+  const output = screen.getByRole('log');
+  expect(output).toHaveClass('whitespace-pre-wrap');
+  expect(output.textContent).toContain(content);
+});
