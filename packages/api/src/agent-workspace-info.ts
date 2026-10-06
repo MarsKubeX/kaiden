@@ -16,33 +16,30 @@
  * SPDX-License-Identifier: Apache-2.0
  ***********************************************************************/
 
-import type { components as cliComponents } from '@openkaiden/kdn-api';
 import type { components as configComponents } from '@openkaiden/workspace-configuration';
 
 /**
- * Workspace data from the `kdn workspace list` command.
- * Matches the CLI contract exactly — fields will be added here
- * as the CLI evolves and publishes them in @openkaiden/kdn-api.
+ * Minimal workspace summary.
+ * Previously mapped to the full `Workspace` schema from `@openkaiden/kdn-api`,
+ * but actual usage is exclusively `Pick<AgentWorkspaceSummary, 'name'>`.
  */
-export type AgentWorkspaceSummary = cliComponents['schemas']['Workspace'];
+export interface AgentWorkspaceSummary {
+  name: string;
+}
 
 /**
  * Returned by mutating workspace commands (e.g. remove, init) to confirm
- * which workspace was affected. Maps to the CLI `WorkspaceId` schema.
+ * which workspace was affected.
  */
-export type AgentWorkspaceId = cliComponents['schemas']['WorkspaceId'];
+export interface AgentWorkspaceId {
+  id: string;
+}
 
 /**
  * The schema for a workspace's YAML configuration file
  * Matches the contract in @openkaiden/workspace-configuration.
  */
 export type AgentWorkspaceConfiguration = configComponents['schemas']['WorkspaceConfiguration'];
-
-/**
- * CLI environment info returned by `kdn info --output json`.
- * Contains the CLI version and supported agents.
- */
-export type CliInfo = cliComponents['schemas']['Info'];
 
 /**
  * The schema for a workspace's network configuration
