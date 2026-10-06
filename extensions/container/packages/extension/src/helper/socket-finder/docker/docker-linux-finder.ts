@@ -24,12 +24,19 @@ import type { SocketFinder } from '/@/api/socket-finder';
 
 @injectable()
 export class DockerSocketLinuxFinder implements SocketFinder {
+  #reported = false;
+
   async findPaths(): Promise<string[]> {
     const socketPath = '/var/run/docker.sock';
 
     if (!existsSync(socketPath)) {
+      if (!this.#reported) {
+        console.warn('No active docker socket found.');
+      }
+      this.#reported = true;
       return [];
     }
+    this.#reported = false;
     return [socketPath];
   }
 }
