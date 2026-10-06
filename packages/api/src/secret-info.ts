@@ -16,19 +16,28 @@
  * SPDX-License-Identifier: Apache-2.0
  ***********************************************************************/
 
-import type { components } from '@openkaiden/kdn-api';
-
 import type { OpenshellProfile } from './openshell-gateway-info.js';
 
 /**
  * Returned by secret create/remove commands to confirm which secret was affected.
  */
-export type SecretName = components['schemas']['SecretName'];
+export interface SecretName {
+  name: string;
+}
 
 /**
- * Secret metadata returned by `kdn secret list`.
+ * Secret metadata returned by secret list commands.
  */
-export type SecretInfo = components['schemas']['SecretInfo'];
+export interface SecretInfo {
+  name: string;
+  type: string;
+  description?: string;
+  envs?: string[];
+  hosts?: string[];
+  path?: string;
+  header?: string;
+  headerTemplate?: string;
+}
 
 /** Secret metadata together with the OpenShell gateway that owns it. */
 export interface GatewaySecretInfo extends SecretInfo {
