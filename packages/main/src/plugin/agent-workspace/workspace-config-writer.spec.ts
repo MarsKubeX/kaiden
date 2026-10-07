@@ -56,8 +56,10 @@ describe('writeWorkspaceConfig', () => {
     });
 
     expect(mkdir).toHaveBeenCalledWith(join('/tmp/my-project', '.kaiden'), { recursive: true });
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/home/user/.kaiden/skills/kubernetes', '/home/user/.kaiden/skills/code-review']);
   });
 
@@ -70,8 +72,10 @@ describe('writeWorkspaceConfig', () => {
       skills: ['/home/user/.kaiden/skills/kubernetes'],
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.mcp).toEqual({ servers: [] });
     expect(parsed.skills).toEqual(['/home/user/.kaiden/skills/kubernetes']);
   });
@@ -86,8 +90,10 @@ describe('writeWorkspaceConfig', () => {
     });
 
     expect(mkdir).toHaveBeenCalledWith(join('/tmp/my-project', '.kaiden'), { recursive: true });
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.network).toEqual({ mode: 'deny', hosts: ['registry.npmjs.org', 'pypi.org'] });
   });
 
@@ -111,8 +117,10 @@ describe('writeWorkspaceConfig', () => {
     });
 
     expect(mkdir).toHaveBeenCalledWith(join('/tmp/my-project', '.kaiden'), { recursive: true });
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.mounts).toEqual([
       { host: '/home/user/data', target: '/workspace/data', ro: false },
       { host: '$HOME/.gitconfig', target: '$HOME/.gitconfig', ro: true },
@@ -128,8 +136,10 @@ describe('writeWorkspaceConfig', () => {
       mounts: [{ host: '$HOME', target: '$HOME', ro: false }],
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.mcp).toEqual({ servers: [] });
     expect(parsed.network).toEqual({ mode: 'allow' });
     expect(parsed.mounts).toEqual([{ host: '$HOME', target: '$HOME', ro: false }]);
@@ -144,8 +154,10 @@ describe('writeWorkspaceConfig', () => {
       network: { mode: 'allow' },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.mcp).toEqual({ servers: [] });
     expect(parsed.network).toEqual({ mode: 'allow' });
   });
@@ -160,8 +172,10 @@ describe('writeWorkspaceConfig', () => {
       network: { mode: 'deny', hosts: ['registry.npmjs.org'] },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/home/user/.kaiden/skills/kubernetes']);
     expect(parsed.network).toEqual({ mode: 'deny', hosts: ['registry.npmjs.org'] });
   });
@@ -176,8 +190,10 @@ describe('writeWorkspaceConfig', () => {
     });
 
     expect(mkdir).toHaveBeenCalledWith(join('/tmp/my-project', '.kaiden'), { recursive: true });
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.secrets).toEqual(['github-token', 'anthropic-key']);
   });
 
@@ -190,8 +206,10 @@ describe('writeWorkspaceConfig', () => {
       secrets: ['github-token'],
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.mcp).toEqual({ servers: [] });
     expect(parsed.secrets).toEqual(['github-token']);
   });
@@ -206,8 +224,10 @@ describe('writeWorkspaceConfig', () => {
       secrets: ['github-token', 'anthropic-key'],
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/home/user/.kaiden/skills/kubernetes']);
     expect(parsed.secrets).toEqual(['github-token', 'anthropic-key']);
   });
@@ -225,7 +245,9 @@ describe('writeWorkspaceConfig', () => {
 
     const calls = vi.mocked(writeFile).mock.calls;
     const configCall = calls.find(c => String(c[0]).endsWith('workspace.json'));
-    const parsed = JSON.parse(configCall![1] as string);
+    assert(configCall !== undefined, 'writeFile was not called with workspace.json');
+    assert(typeof configCall[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(configCall[1]);
     expect(parsed.mcp.commands).toEqual([
       {
         name: 'pypi-server',
@@ -250,8 +272,10 @@ describe('writeWorkspaceConfig', () => {
       },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.mcp.servers).toEqual([{ name: 'github', url: 'https://mcp.github.com/sse' }]);
     expect(parsed.mcp.commands).toEqual([{ name: 'playwright', command: 'npx', args: ['-y', '@playwright/mcp'] }]);
     expect(parsed.features).toEqual({ 'ghcr.io/devcontainers/features/node:1': { version: '22' } });
@@ -274,7 +298,9 @@ describe('writeWorkspaceConfig', () => {
 
     const calls = vi.mocked(writeFile).mock.calls;
     const configCall = calls.find(c => String(c[0]).endsWith('workspace.json'));
-    const parsed = JSON.parse(configCall![1] as string);
+    assert(configCall !== undefined, 'writeFile was not called with workspace.json');
+    assert(typeof configCall[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(configCall[1]);
     expect(parsed.features).toEqual({ './uv-feature': { version: '3.12' } });
   });
 
@@ -300,8 +326,10 @@ describe('writeWorkspaceConfig', () => {
     });
 
     expect(mkdir).toHaveBeenCalledWith(join('/tmp/my-project', '.kaiden'), { recursive: true });
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.environment).toEqual([
       { name: 'CLAUDE_CODE_USE_VERTEX', value: '1' },
       { name: 'CLOUD_ML_REGION', value: 'us-east5' },
@@ -326,8 +354,10 @@ describe('writeWorkspaceConfig', () => {
       },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.environment).toEqual([
       { name: 'EXISTING_VAR', value: 'keep' },
       { name: 'NEW_VAR', value: 'added' },
@@ -350,8 +380,10 @@ describe('writeWorkspaceConfig', () => {
       },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.environment).toEqual([
       { name: 'CLOUD_ML_REGION', value: 'existing-region' },
       { name: 'NEW_VAR', value: 'added' },
@@ -376,8 +408,10 @@ describe('writeWorkspaceConfig', () => {
       },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.mounts).toEqual([
       { host: '$HOME/.config/gcloud/adc.json', target: '$HOME/.config/gcloud/adc.json', ro: true },
       { host: '$HOME/.ssh/config', target: '$HOME/.ssh/config', ro: true },
@@ -396,8 +430,10 @@ describe('writeWorkspaceConfig', () => {
       },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.secrets).toEqual(['github-token', 'shared-secret', 'vertex-creds']);
   });
 
@@ -413,8 +449,10 @@ describe('writeWorkspaceConfig', () => {
     });
 
     expect(writeFile).toHaveBeenCalled();
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.environment).toEqual([{ name: 'FOO', value: 'bar' }]);
   });
 
@@ -432,8 +470,10 @@ describe('writeWorkspaceConfig', () => {
       },
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/home/user/.kaiden/skills/kubernetes']);
     expect(parsed.network).toEqual({ mode: 'deny', hosts: ['registry.npmjs.org'] });
     expect(parsed.environment).toEqual([{ name: 'CLAUDE_CODE_USE_VERTEX', value: '1' }]);
@@ -457,7 +497,10 @@ describe('writeWorkspaceConfig', () => {
       expect.any(String),
       'utf-8',
     );
-    const parsed = JSON.parse(vi.mocked(writeFile).mock.calls[0]![1] as string);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/path/to/skill']);
   });
 
@@ -484,7 +527,10 @@ describe('writeWorkspaceConfig', () => {
       '/global/agent-workspaces/gw/my-sandbox',
     );
 
-    const parsed = JSON.parse(vi.mocked(writeFile).mock.calls[0]![1] as string);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/existing/skill']);
     expect(parsed.network).toEqual({ mode: 'allow' });
   });
@@ -500,8 +546,10 @@ describe('writeWorkspaceConfig', () => {
       skills: ['/home/user/.kaiden/skills/kubernetes'],
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.secrets).toEqual(['existing-secret']);
   });
 
@@ -514,8 +562,10 @@ describe('writeWorkspaceConfig', () => {
       description: 'My workspace description',
     });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.description).toBe('My workspace description');
   });
 
@@ -525,8 +575,10 @@ describe('writeWorkspaceConfig', () => {
 
     await writeWorkspaceConfig(defaultOptions);
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.description).toBeUndefined();
   });
 
@@ -539,8 +591,8 @@ describe('writeWorkspaceConfig', () => {
     });
 
     const call = vi.mocked(writeFile).mock.calls[0];
-    assert(call, 'writeFile was not called');
-    assert(typeof call[1] === 'string');
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
     const parsed = JSON.parse(call[1]);
     expect(parsed.image).toBe('ghcr.io/my-org/my-custom-agent:1.0.0');
   });
@@ -551,8 +603,8 @@ describe('writeWorkspaceConfig', () => {
     await writeWorkspaceConfig(defaultOptions);
 
     const call = vi.mocked(writeFile).mock.calls[0];
-    assert(call, 'writeFile was not called');
-    assert(typeof call[1] === 'string');
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
     const parsed = JSON.parse(call[1]);
     expect(parsed.image).toBeUndefined();
   });
@@ -563,8 +615,8 @@ describe('writeWorkspaceConfig', () => {
     await writeWorkspaceConfig(defaultOptions);
 
     const call = vi.mocked(writeFile).mock.calls[0];
-    assert(call, 'writeFile was not called');
-    assert(typeof call[1] === 'string');
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
     const parsed = JSON.parse(call[1]);
     expect(parsed.image).toBeUndefined();
   });
@@ -578,8 +630,10 @@ describe('updateWorkspaceConfig', () => {
 
     await updateWorkspaceConfig(CONFIG_DIR, { network: { mode: 'deny', hosts: ['api.example.com'] } });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/path/to/skill1']);
     expect(parsed.network).toEqual({ mode: 'deny', hosts: ['api.example.com'] });
   });
@@ -590,8 +644,10 @@ describe('updateWorkspaceConfig', () => {
     await updateWorkspaceConfig(CONFIG_DIR, { skills: ['/path/to/skill1'] });
 
     expect(writeFile).toHaveBeenCalledWith(join(CONFIG_DIR, 'workspace.json'), expect.any(String), 'utf-8');
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/path/to/skill1']);
   });
 
@@ -600,8 +656,10 @@ describe('updateWorkspaceConfig', () => {
 
     await updateWorkspaceConfig(CONFIG_DIR, { skills: ['/new/skill'] });
 
-    const writtenContent = vi.mocked(writeFile).mock.calls[0]![1] as string;
-    const parsed = JSON.parse(writtenContent);
+    const call = vi.mocked(writeFile).mock.calls[0];
+    assert(call !== undefined, 'writeFile was not called');
+    assert(typeof call[1] === 'string', 'writeFile second argument is not a string');
+    const parsed = JSON.parse(call[1]);
     expect(parsed.skills).toEqual(['/new/skill']);
     expect(parsed.network).toEqual({ mode: 'allow' });
   });
