@@ -23,6 +23,8 @@ import { InversifyBinding } from '/@/inject/inversify-binding';
 import { InferenceModelManager } from '/@/manager/inference-model-manager';
 
 export class PodmanAiLabExtension {
+  static readonly #CONTAINER_EXTENSION_ID = 'kaiden.container';
+
   #extensionContext: ExtensionContext;
 
   #inversifyBinding: InversifyBinding | undefined;
@@ -34,14 +36,14 @@ export class PodmanAiLabExtension {
   }
 
   async activate(): Promise<void> {
-    const KAIDEN_CONTAINER_EXTENSION_ID = 'kaiden.container';
-    const containerExtension = extensions.getExtension<ContainerExtensionAPI>(KAIDEN_CONTAINER_EXTENSION_ID);
+    const id = PodmanAiLabExtension.#CONTAINER_EXTENSION_ID;
+    const containerExtension = extensions.getExtension<ContainerExtensionAPI>(id);
     if (!containerExtension) {
-      throw new Error(`Mandatory extension ${KAIDEN_CONTAINER_EXTENSION_ID} is not installed`);
+      throw new Error(`Mandatory extension ${id} is not installed`);
     }
-    const containerExtensionAPI = containerExtension?.exports;
+    const containerExtensionAPI = containerExtension.exports;
     if (!containerExtensionAPI) {
-      throw new Error(`Missing exports of API in container extension ${KAIDEN_CONTAINER_EXTENSION_ID}`);
+      throw new Error(`Missing exports of API in container extension ${id}`);
     }
 
     const telemetryLogger = env.createTelemetryLogger();
@@ -71,7 +73,7 @@ export class PodmanAiLabExtension {
     try {
       this.#inferenceModelManager = await this.getContainer()?.getAsync(InferenceModelManager);
     } catch (e) {
-      console.error('Error while creating the container provider manager', e);
+      console.error('Error while creating the InferenceModelManager', e);
       throw e;
     }
 

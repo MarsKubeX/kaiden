@@ -28,8 +28,10 @@ import { PodmanAiLabExtension } from '/@/podman-ai-lab-extension';
 vi.mock(import('/@/manager/inference-model-manager'));
 
 class TestPodmanAiLabExtension extends PodmanAiLabExtension {
-  getContainer(): Container | undefined {
-    return super.getContainer();
+  containerOverride: Container | undefined;
+
+  protected override getContainer(): Container | undefined {
+    return this.containerOverride ?? super.getContainer();
   }
 }
 
@@ -39,7 +41,6 @@ describe('PodmanAiLabExtension', () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
-    vi.clearAllMocks();
     extensionContext = { subscriptions: [] } as unknown as ExtensionContext;
     podmanAiLabExtension = new TestPodmanAiLabExtension(extensionContext);
     const extensionData = {
@@ -70,10 +71,9 @@ describe('PodmanAiLabExtension', () => {
   });
 
   test('activate handles error during container creation', async () => {
-    const faultyGetAsync = vi.fn().mockRejectedValue(new Error('Container creation failed'));
-    vi.spyOn(podmanAiLabExtension, 'getContainer').mockReturnValue({
-      getAsync: faultyGetAsync,
-    } as unknown as Container);
+    podmanAiLabExtension.containerOverride = {
+      getAsync: vi.fn().mockRejectedValue(new Error('Container creation failed')),
+    } as unknown as Container;
     await expect(podmanAiLabExtension.activate()).rejects.toThrow('Container creation failed');
   });
 

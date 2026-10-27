@@ -33,9 +33,10 @@ import { InferenceModelManager } from './inference-model-manager';
 vi.mock(import('@ai-sdk/openai-compatible'));
 
 const disposableMock = { dispose: vi.fn() };
+const subscriptionDisposableMock = { dispose: vi.fn() };
 const modelsHandlerMock: ModelsHandler = {
   init: vi.fn(),
-  onModelsChanged: vi.fn(),
+  onModelsChanged: vi.fn().mockReturnValue(subscriptionDisposableMock),
 } as unknown as ModelsHandler;
 const podmanAiLabProviderMock: Provider = {
   registerInferenceProviderConnection: vi.fn(),
@@ -47,6 +48,7 @@ describe('InferenceModelManager', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
 
+    vi.mocked(modelsHandlerMock.onModelsChanged).mockReturnValue(subscriptionDisposableMock);
     vi.mocked(podmanAiLabProviderMock.registerInferenceProviderConnection).mockReturnValue(disposableMock);
     const container = new Container();
     container.bind(InferenceModelManager).toSelf();
@@ -214,7 +216,8 @@ describe('InferenceModelManager', () => {
   });
 
   test('init wires model changes to refresh logic and initializes handler', async () => {
-    const refreshRegistrationOfModelsSpy = vi.spyOn(inferenceModelManager, 'refreshRegistrationOfModels');
+    const sdkInstance: OpenAICompatibleProvider = {} as unknown as OpenAICompatibleProvider;
+    vi.mocked(createOpenAICompatible).mockReturnValue(sdkInstance);
     await inferenceModelManager.init();
 
     expect(modelsHandlerMock.onModelsChanged).toHaveBeenCalledTimes(1);
@@ -223,25 +226,27 @@ describe('InferenceModelManager', () => {
     const modelsSample = [{ id: 'modelThree', name: 'ModelThree', baseUrl: 'http://localhost:3000/v1' }] as ModelInfo[];
 
     const onModelsChangedCallback = vi.mocked(modelsHandlerMock.onModelsChanged).mock.calls[0]?.[0];
-    expect(onModelsChangedCallback).toBeDefined();
+    assert(onModelsChangedCallback);
 
-    await onModelsChangedCallback?.(modelsSample);
+    await onModelsChangedCallback(modelsSample);
 
-    expect(refreshRegistrationOfModelsSpy).toHaveBeenCalledWith(modelsSample);
-
-    expect(modelsHandlerMock.init).toHaveBeenCalled();
+    expect(podmanAiLabProviderMock.registerInferenceProviderConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'ModelThree' }),
+    );
   });
 
-  test('on dispose connections are disposed', async () => {
+  test('on dispose connections and subscriptions are disposed', async () => {
     const sdkInstance: OpenAICompatibleProvider = {} as unknown as OpenAICompatibleProvider;
     vi.mocked(createOpenAICompatible).mockReturnValueOnce(sdkInstance);
 
+    await inferenceModelManager.init();
     await inferenceModelManager.refreshRegistrationOfModels([
       { id: 'modelA', name: 'ModelA', baseUrl: 'http://localhost:9090/v1' },
     ]);
 
     inferenceModelManager.dispose();
 
+    expect(subscriptionDisposableMock.dispose).toHaveBeenCalled();
     expect(disposableMock.dispose).toHaveBeenCalled();
   });
 });

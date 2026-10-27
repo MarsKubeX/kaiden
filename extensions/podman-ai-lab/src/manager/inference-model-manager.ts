@@ -33,10 +33,11 @@ export class InferenceModelManager {
   private podmanAiLabProvider: Provider;
 
   #modelsDisposable: Disposable[] = [];
+  #modelsChangedSubscription: Disposable | undefined;
   #connectionIdCounter = 0;
 
   async init(): Promise<void> {
-    this.modelsHandler.onModelsChanged(async models => {
+    this.#modelsChangedSubscription = this.modelsHandler.onModelsChanged(async models => {
       await this.refreshRegistrationOfModels(models);
     });
 
@@ -137,6 +138,8 @@ export class InferenceModelManager {
   }
 
   dispose(): void {
+    this.#modelsChangedSubscription?.dispose();
+    this.#modelsChangedSubscription = undefined;
     for (const disposable of this.#modelsDisposable) {
       disposable.dispose();
     }
