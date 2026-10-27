@@ -207,14 +207,6 @@ export class AgentWorkspaceManager implements Disposable {
         throw new Error(`gateway "${options.gateway}" is unreachable`);
       }
 
-      if (options.replaceConfig) {
-        if (options.sourcePath) {
-          await rm(join(options.sourcePath, '.kaiden', 'workspace.json'), { force: true });
-        } else if (options.name) {
-          await rm(join(this.getGlobalConfigDir(options.gateway, options.name), 'workspace.json'), { force: true });
-        }
-      }
-
       const sandboxName = options.name ?? (options.sourcePath ? basename(options.sourcePath) : undefined);
       if (!sandboxName) {
         throw new Error('workspace name is required when no project folder is specified');
@@ -272,6 +264,14 @@ export class AgentWorkspaceManager implements Disposable {
       : registeredModel;
     const rawEndpoint = connectionInfo?.endpoint ?? options.model.split('::')[2] ?? undefined;
     const endpoint = rawEndpoint ? this.openshellNetworkPolicy.rewriteLocalhostUrl(rawEndpoint) : undefined;
+
+    if (options.replaceConfig) {
+      if (options.sourcePath) {
+        await rm(join(options.sourcePath, '.kaiden', 'workspace.json'), { force: true });
+      } else {
+        await rm(join(this.getGlobalConfigDir(options.gateway, sandboxName), 'workspace.json'), { force: true });
+      }
+    }
 
     const configDir = options.sourcePath ? undefined : this.getGlobalConfigDir(options.gateway, sandboxName);
     const workspace = await writeWorkspaceConfig(options, configDir);

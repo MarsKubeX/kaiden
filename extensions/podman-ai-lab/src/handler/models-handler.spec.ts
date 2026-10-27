@@ -37,9 +37,10 @@ const containerModelExtractorMock = {
   extractModels: vi.fn(),
 } as unknown as ContainerModelExtractor;
 
+const disposableMock = { dispose: vi.fn() };
 const containerExtensionAPIMock = {
-  onEndpointsChanged: vi.fn(),
-  onContainersChanged: vi.fn(),
+  onEndpointsChanged: vi.fn().mockReturnValue(disposableMock),
+  onContainersChanged: vi.fn().mockReturnValue(disposableMock),
   getEndpoints: vi.fn().mockReturnValue([]),
 } as unknown as ContainerExtensionAPI;
 
@@ -58,6 +59,8 @@ let modelsHandler: TestModelsHandler;
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  vi.mocked(containerExtensionAPIMock.onEndpointsChanged).mockReturnValue(disposableMock);
+  vi.mocked(containerExtensionAPIMock.onContainersChanged).mockReturnValue(disposableMock);
   vi.mocked(containerExtensionAPIMock.getEndpoints).mockReturnValue([]);
   const container = new Container();
   container.bind(TestModelsHandler).toSelf().inSingletonScope();
@@ -108,8 +111,10 @@ test('test log failures on endpoint change event', async () => {
   expect(consoleErrorSpy).toHaveBeenCalledWith('Error refreshing models:', expect.any(Error));
 });
 
-test('should dispose', async () => {
+test('should dispose subscriptions and event emitter', async () => {
+  await modelsHandler.init();
   modelsHandler.dispose();
+  expect(disposableMock.dispose).toHaveBeenCalled();
   expect(modelsHandler.getModelsChanged().dispose).toHaveBeenCalled();
 });
 

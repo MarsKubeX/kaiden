@@ -16,7 +16,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ***********************************************************************/
 
-import { type Event, EventEmitter } from '@openkaiden/api';
+import { type Disposable, type Event, EventEmitter } from '@openkaiden/api';
 import type { ContainerExtensionAPI, EndpointConnection } from '@openkaiden/container-extension-api';
 import { inject, preDestroy } from 'inversify';
 
@@ -41,6 +41,8 @@ export class ModelsHandler {
 
   #models: readonly ModelInfo[] = [];
 
+  #subscriptions: Disposable[] = [];
+
   #onModelsChanged: EventEmitter<readonly ModelInfo[]>;
   public readonly onModelsChanged: Event<readonly ModelInfo[]>;
 
@@ -51,22 +53,30 @@ export class ModelsHandler {
 
   @preDestroy()
   dispose(): void {
+    for (const subscription of this.#subscriptions) {
+      subscription.dispose();
+    }
+    this.#subscriptions = [];
     this.#onModelsChanged.dispose();
   }
 
   async init(): Promise<void> {
-    this.containerExtensionAPI.onEndpointsChanged(dockerodeConnections => {
-      this.#connections = dockerodeConnections;
-      this.refreshModels().catch((error: unknown) => {
-        console.error('Error refreshing models:', error);
-      });
-    });
+    this.#subscriptions.push(
+      this.containerExtensionAPI.onEndpointsChanged(dockerodeConnections => {
+        this.#connections = dockerodeConnections;
+        this.refreshModels().catch((error: unknown) => {
+          console.error('Error refreshing models:', error);
+        });
+      }),
+    );
 
-    this.containerExtensionAPI.onContainersChanged(() => {
-      this.refreshModels().catch((error: unknown) => {
-        console.error('Error refreshing models:', error);
-      });
-    });
+    this.#subscriptions.push(
+      this.containerExtensionAPI.onContainersChanged(() => {
+        this.refreshModels().catch((error: unknown) => {
+          console.error('Error refreshing models:', error);
+        });
+      }),
+    );
 
     this.#connections = this.containerExtensionAPI.getEndpoints();
 

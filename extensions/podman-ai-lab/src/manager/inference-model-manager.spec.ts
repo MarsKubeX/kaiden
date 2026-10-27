@@ -174,6 +174,21 @@ describe('InferenceModelManager', () => {
     }
   });
 
+  test('wraps network errors with actionable context', async () => {
+    const server = setupServer(http.get('http://localhost:9090/props', () => HttpResponse.error()));
+    server.listen({ onUnhandledRequest: 'error' });
+    try {
+      await inferenceModelManager.refreshRegistrationOfModels([
+        { id: 'qwen', name: 'qwen', baseUrl: 'http://localhost:9090/v1' },
+      ]);
+      const registration = vi.mocked(podmanAiLabProviderMock.registerInferenceProviderConnection).mock.calls[0];
+      assert(registration?.[0].getModelInfo);
+      await expect(registration[0].getModelInfo({ label: 'qwen' })).rejects.toThrow(/Podman AI Lab:.*props/);
+    } finally {
+      server.close();
+    }
+  });
+
   test('handles empty models array', async () => {
     const sdkInstance: OpenAICompatibleProvider = {} as unknown as OpenAICompatibleProvider;
     vi.mocked(createOpenAICompatible).mockReturnValue(sdkInstance);

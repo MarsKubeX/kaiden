@@ -33,13 +33,18 @@ export class ContainerModelExtractor {
       return [];
     }
 
-    if (!Array.isArray(modelIds) || modelIds.length === 0) {
+    if (!Array.isArray(modelIds)) {
+      return [];
+    }
+
+    const validIds = modelIds.filter((id): id is string => typeof id === 'string' && id.length > 0);
+    if (validIds.length === 0) {
       return [];
     }
 
     const baseUrl = this.#resolveBaseUrl(container);
 
-    return modelIds.map(id => ({
+    return validIds.map(id => ({
       id,
       name: this.#toDisplayName(id),
       baseUrl,

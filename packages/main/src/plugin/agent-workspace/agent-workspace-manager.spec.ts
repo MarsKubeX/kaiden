@@ -794,6 +794,26 @@ describe('create – OpenShell mode', () => {
     expect(sdkSandbox.create).not.toHaveBeenCalled();
   });
 
+  test('preserves existing config when replaceConfig is set but model preparation fails', async () => {
+    vi.mocked(providerRegistry.getInferenceConnectionFromModel).mockReturnValue({
+      providerId: 'podman-ai-lab',
+      connection: {
+        id: 'qwen',
+        name: 'Qwen',
+        type: 'local',
+        sdk: { specificationVersion: 'v3', languageModel: vi.fn(), embeddingModel: vi.fn(), imageModel: vi.fn() },
+        credentials: () => ({}),
+        status: () => 'started',
+        models: [{ label: 'qwen' }],
+        getModelInfo: vi.fn().mockRejectedValue(new Error('Inference service is not ready')),
+      },
+    });
+    await expect(
+      manager.create({ ...defaultOptions, model: 'openai::qwen::http://localhost:8000/v1', replaceConfig: true }),
+    ).rejects.toThrow('Inference service is not ready');
+    expect(rm).not.toHaveBeenCalled();
+  });
+
   test('uploads updated configuration files to sandbox', async () => {
     const configFile = {
       path: '/home/user/.config/agent/config.toml',

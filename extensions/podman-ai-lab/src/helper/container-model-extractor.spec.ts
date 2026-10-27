@@ -123,6 +123,24 @@ test('extractModels replaces dots with hyphens in display name', () => {
   });
 });
 
+test('extractModels filters out non-string model IDs', () => {
+  const containerModelExtractor = new ContainerModelExtractor();
+
+  const container = {
+    Id: '1',
+    Names: ['/container1'],
+    Labels: {
+      'ai-lab-inference-server': '[123, null, "", "hf.co/org/validModel"]',
+      api: 'http://localhost:9090/v1',
+    },
+    Ports: [{ PublicPort: 9090 }],
+  } as unknown as PodmanAiLabContainerInfo;
+
+  const models = containerModelExtractor.extractModels(container);
+  expect(models).toHaveLength(1);
+  expect(models[0]).toEqual({ id: 'hf.co/org/validModel', name: 'validModel', baseUrl: 'http://localhost:9090/v1' });
+});
+
 test('extractModels returns empty array for empty JSON array label', () => {
   const containerModelExtractor = new ContainerModelExtractor();
 

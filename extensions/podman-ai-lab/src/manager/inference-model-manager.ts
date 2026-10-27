@@ -76,13 +76,13 @@ export class InferenceModelManager {
 
   private async getModelInfo(baseUrl: string, model: InferenceModel): Promise<InferenceModel> {
     const propertiesUrl = new URL('../props', `${baseUrl.replace(/\/$/, '')}/`);
-    const response = await fetch(propertiesUrl, { signal: AbortSignal.timeout(5_000) });
+    const response = await this.fetchWithContext(propertiesUrl, { signal: AbortSignal.timeout(5_000) });
     if (!response.ok) {
       throw new Error(
         `Podman AI Lab: cannot read inference server settings (HTTP ${response.status}). Check that the model service is ready.`,
       );
     }
-    const properties: unknown = await response.json();
+    const properties: unknown = await this.parseJsonWithContext(response, propertiesUrl);
     const settings =
       properties && typeof properties === 'object' && 'default_generation_settings' in properties
         ? properties.default_generation_settings
@@ -91,8 +91,9 @@ export class InferenceModelManager {
     if (typeof contextWindow !== 'number' || !Number.isSafeInteger(contextWindow) || contextWindow <= 0) {
       throw new Error('Podman AI Lab: the inference server did not report a valid context window in /props.');
     }
+    const templateUrl = new URL('apply-template', propertiesUrl);
     // llama.cpp applies the same tool/template parser as chat completions here, without running inference.
-    const templateResponse = await fetch(new URL('apply-template', propertiesUrl), {
+    const templateResponse = await this.fetchWithContext(templateUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(5_000),
@@ -117,6 +118,22 @@ export class InferenceModelManager {
       );
     }
     return { ...model, contextWindow, unsupportedToolSchemaKeywords: ['pattern'] };
+  }
+
+  private async fetchWithContext(url: URL, init?: RequestInit): Promise<Response> {
+    try {
+      return await fetch(url, init);
+    } catch (error: unknown) {
+      throw new Error(`Podman AI Lab: failed to reach ${url.href}`, { cause: error });
+    }
+  }
+
+  private async parseJsonWithContext(response: Response, url: URL): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch (error: unknown) {
+      throw new Error(`Podman AI Lab: invalid JSON response from ${url.href}`, { cause: error });
+    }
   }
 
   dispose(): void {
