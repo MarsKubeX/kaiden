@@ -37,8 +37,10 @@ export class InferenceModelManager {
   #connectionIdCounter = 0;
 
   async init(): Promise<void> {
-    this.#modelsChangedSubscription = this.modelsHandler.onModelsChanged(async models => {
-      await this.refreshRegistrationOfModels(models);
+    this.#modelsChangedSubscription = this.modelsHandler.onModelsChanged(models => {
+      this.refreshRegistrationOfModels(models).catch((error: unknown) => {
+        console.error('Error refreshing model registrations:', error);
+      });
     });
 
     await this.modelsHandler.init();
