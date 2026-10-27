@@ -187,6 +187,7 @@ const configurationRegistry = {
 
 const providerRegistry = {
   getInferenceConnectionCredentials: vi.fn(),
+  getInferenceConnectionFromModel: vi.fn(),
   getProvider: vi.fn(),
 } as unknown as ProviderRegistry;
 
@@ -746,6 +747,51 @@ describe('create – OpenShell mode', () => {
       configurationFiles: [],
       workspace: expect.anything(),
     });
+  });
+
+  test('resolves current model capabilities before configuring the agent', async () => {
+    const model = { label: 'qwen', contextWindow: 32768, unsupportedToolSchemaKeywords: ['pattern'] };
+    const getModelInfo = vi.fn().mockResolvedValue(model);
+    const preWorkspaceStart = vi.fn();
+    vi.mocked(agentRegistry.getAgentRegistration).mockReturnValue({ ...mockAgent, preWorkspaceStart });
+    vi.mocked(providerRegistry.getInferenceConnectionFromModel).mockReturnValue({
+      providerId: 'podman-ai-lab',
+      connection: {
+        id: 'qwen',
+        name: 'Qwen',
+        type: 'local',
+        sdk: { specificationVersion: 'v3', languageModel: vi.fn(), embeddingModel: vi.fn(), imageModel: vi.fn() },
+        credentials: () => ({}),
+        status: () => 'started',
+        models: [{ label: 'qwen' }],
+        getModelInfo,
+      },
+    });
+    await manager.create({ ...defaultOptions, model: 'openai::qwen::http://localhost:8000/v1' });
+    expect(getModelInfo).toHaveBeenCalledWith({ label: 'qwen' });
+    expect(preWorkspaceStart).toHaveBeenCalledWith(
+      expect.objectContaining({ model: expect.objectContaining({ model }) }),
+    );
+  });
+
+  test('does not create a sandbox when model preparation fails', async () => {
+    vi.mocked(providerRegistry.getInferenceConnectionFromModel).mockReturnValue({
+      providerId: 'podman-ai-lab',
+      connection: {
+        id: 'qwen',
+        name: 'Qwen',
+        type: 'local',
+        sdk: { specificationVersion: 'v3', languageModel: vi.fn(), embeddingModel: vi.fn(), imageModel: vi.fn() },
+        credentials: () => ({}),
+        status: () => 'started',
+        models: [{ label: 'qwen' }],
+        getModelInfo: vi.fn().mockRejectedValue(new Error('Inference service is not ready')),
+      },
+    });
+    await expect(
+      manager.create({ ...defaultOptions, model: 'openai::qwen::http://localhost:8000/v1' }),
+    ).rejects.toThrow('Inference service is not ready');
+    expect(sdkSandbox.create).not.toHaveBeenCalled();
   });
 
   test('uploads updated configuration files to sandbox', async () => {

@@ -856,6 +856,37 @@ importers:
         specifier: ^4.0.10
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jiti@2.6.1)(jsdom@27.4.0)(lightningcss@1.31.1)(msw@2.12.10(@types/node@24.13.3)(typescript@5.9.3))(terser@5.36.0)(tsx@4.20.3)(yaml@2.8.2)
 
+  extensions/podman-ai-lab:
+    dependencies:
+      '@ai-sdk/openai-compatible':
+        specifier: ^3.0.13
+        version: 3.0.66(zod@4.4.3)
+      inversify:
+        specifier: ^7.7.1
+        version: 7.11.0(reflect-metadata@0.2.2)
+    devDependencies:
+      '@openkaiden/api':
+        specifier: workspace:*
+        version: link:../../packages/extension-api
+      '@openkaiden/container-extension-api':
+        specifier: workspace:*
+        version: link:../container/packages/api
+      adm-zip:
+        specifier: ^0.5.16
+        version: 0.5.16
+      mkdirp:
+        specifier: ^3.0.1
+        version: 3.0.1
+      msw:
+        specifier: ^2.12.2
+        version: 2.12.10(@types/node@24.13.3)(typescript@5.9.3)
+      vite:
+        specifier: ^7.1.2
+        version: 7.3.1(@types/node@24.13.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.36.0)(tsx@4.20.3)(yaml@2.8.2)
+      vitest:
+        specifier: ^4.0.10
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jiti@2.6.1)(jsdom@27.4.0)(lightningcss@1.31.1)(msw@2.12.10(@types/node@24.13.3)(typescript@5.9.3))(terser@5.36.0)(tsx@4.20.3)(yaml@2.8.2)
+
   extensions/ramalama:
     dependencies:
       '@ai-sdk/openai-compatible':
@@ -8207,7 +8238,7 @@ snapshots:
       read-binary-file-arch: 1.0.6
       semver: 7.8.5
       tar: 7.5.16
-      yargs: 17.7.2
+      yargs: 17.7.3
     transitivePeerDependencies:
       - bluebird
       - supports-color
@@ -13483,7 +13514,7 @@ snapshots:
       tough-cookie: 6.0.0
       type-fest: 5.4.4
       until-async: 3.0.2
-      yargs: 17.7.2
+      yargs: 17.7.3
     optionalDependencies:
       typescript: 5.9.3
     transitivePeerDependencies:
@@ -13508,7 +13539,7 @@ snapshots:
       tough-cookie: 6.0.0
       type-fest: 5.4.4
       until-async: 3.0.2
-      yargs: 17.7.2
+      yargs: 17.7.3
     optionalDependencies:
       typescript: 5.9.3
     transitivePeerDependencies:
@@ -14971,7 +15002,7 @@ snapshots:
       '@types/yargs': 17.0.33
       tsutils: 3.21.0(typescript@5.9.3)
       typescript: 5.9.3
-      yargs: 17.7.2
+      yargs: 17.7.3
 
   tsutils@3.21.0(typescript@5.9.3):
     dependencies:

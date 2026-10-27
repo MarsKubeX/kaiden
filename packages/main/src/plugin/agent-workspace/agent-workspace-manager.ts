@@ -263,6 +263,13 @@ export class AgentWorkspaceManager implements Disposable {
     const connectionInfo = this.providerRegistry.getInferenceConnectionCredentials(options.model);
 
     const modelName = options.model.split('::')[1] ?? '';
+    const inferenceConnection = this.providerRegistry.getInferenceConnectionFromModel(options.model)?.connection;
+    const registeredModel = inferenceConnection?.models.find(model => model.label === modelName) ?? {
+      label: modelName,
+    };
+    const modelInfo = inferenceConnection?.getModelInfo
+      ? await inferenceConnection.getModelInfo(registeredModel)
+      : registeredModel;
     const rawEndpoint = connectionInfo?.endpoint ?? options.model.split('::')[2] ?? undefined;
     const endpoint = rawEndpoint ? this.openshellNetworkPolicy.rewriteLocalhostUrl(rawEndpoint) : undefined;
 
@@ -282,7 +289,7 @@ export class AgentWorkspaceManager implements Disposable {
     await agent.preWorkspaceStart({
       model: {
         llmMetadata: connectionInfo?.llmMetadataName ? { name: connectionInfo.llmMetadataName } : undefined,
-        model: { label: modelName ?? '' },
+        model: modelInfo,
         endpoint,
       },
       configurationFiles: writable,

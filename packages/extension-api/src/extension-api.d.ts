@@ -548,6 +548,10 @@ declare module '@openkaiden/api' {
 
   export interface InferenceModel {
     label: string;
+    /** Configured server context window in tokens. Defaults to the agent's own model limit when omitted. */
+    contextWindow?: number;
+    /** JSON Schema keywords the server cannot accept in tool definitions. Defaults to no restrictions. */
+    unsupportedToolSchemaKeywords?: readonly string[];
   }
 
   export type InferenceProviderConnectionType = 'cloud' | 'local' | 'self-hosted';
@@ -569,6 +573,12 @@ declare module '@openkaiden/api' {
     status(): ProviderConnectionStatus;
     // list of models
     models: Array<InferenceModel>;
+    /**
+     * Resolves current model limits and compatibility before an agent workspace starts.
+     * May reject with an actionable error when the inference service is not ready.
+     * When omitted, the registered model information is used unchanged.
+     */
+    getModelInfo?(model: InferenceModel): Promise<InferenceModel>;
   };
 
   export interface InputResponse {
